@@ -144,6 +144,7 @@ logger = logging.getLogger(__name__)
 # Initialize Flask app
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev")
+app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024  # up to 10 files x 3MB
 
 # Add CORS
 CORS(app, origins=["*"])
@@ -893,6 +894,7 @@ def upload_page():
                     return;
                 }
                 
+                const countText = `${selectedFiles.length}ファイル選択`;
                 const listHtml = selectedFiles.map(file => 
                     `<div class="d-flex justify-content-between align-items-center border-bottom py-2">
                         <span>${file.name}</span>
@@ -900,7 +902,10 @@ def upload_page():
                     </div>`
                 ).join('');
                 
-                fileList.innerHTML = `<div class="border rounded p-2">${listHtml}</div>`;
+                fileList.innerHTML = `
+                    <div class="alert alert-info">${countText}</div>
+                    <div class="border rounded p-2">${listHtml}</div>
+                `;
             }
 
             btnUpload.addEventListener('click', async () => {

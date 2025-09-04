@@ -1,0 +1,58 @@
+You are editing my app “InvoiceAgent Lite”.
+Goal: make true multi-file upload work on /upload. Do NOT change the framework (keep Flask + gunicorn), routes other than noted, or any deployment settings. Keep Japanese UI text as-is. Keep the existing extraction logic and response schema.
+
+Fixes required:
+1) Front-end (templates/upload.html and its JS):
+   - Ensure the file input is truly multi-file:
+       <input id="fileInput" name="files" type="file" accept="application/pdf" multiple>
+   - Drag & drop must also accept multiple files and show a count/list.
+   - When clicking the “アップロードして解析” button, build FormData by appending **all** selected files:
+       const fd = new FormData();
+       for (const f of selectedFiles) fd.append('files', f);
+     Then POST to /api/upload and render the returned rows.
+   - The “クリア” button must reset the selectedFiles array, clear the preview count, empty the results table, and disable export buttons until new results arrive.
+
+2) Back-end (app.py):
+   - Keep Flask. Add/ensure:
+       app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024   # up to 10 files x 3MB
+   - Update /api/upload to support multiple files:
+       - Read files = request.files.getlist('files')
+       - If len(files) == 0: return 400
+       - Enforce max 10 files; if >10 return 400
+       - For each file:
+           * Validate PDF (filename endswith .pdf and (file.mimetype == 'application/pdf' or allow octet-stream))
+           * Enforce per-file size <= 3MB (if size not provided, read into bytes and check len)
+           * Read bytes = file.read(); then reset needlessly; we only process bytes in memory
+           * Call the existing extraction function used by the single-file path (reuse whatever helper the app currently uses, e.g. extract_fields_from_pdf_bytes(bytes) that returns dict keys: amount, date, vendor, confidence, needs_review, raw_excerpt). DO NOT change keys.
+           * Append a result dict:
+             {
+               "file": file.filename,
+               "date": date or null,
+               "amount": amount or null,
+               "vendor": vendor or null,
+               "confidence": confidence or 0,
+               "needs_review": "TRUE"/"FALSE",
+               "raw_excerpt": raw_excerpt
+             }
+       - Keep sheet logging behavior unchanged: if Google Sheets is connected, save each row; otherwise skip saving.
+       - Response JSON MUST be:
+         {"ok": true, "results": [...], "sheet_status": "<existing status string>"}
+
+3) Export buttons:
+   - “結果をCSVで保存” should export **all current rows** in the table (not just the last one).
+   - “結果をJSONで保存” should export an array with the same objects as in response.results.
+   - Disable these buttons when there are 0 rows; enable when >=1.
+
+4) Acceptance tests (please run them and paste a short log):
+   - /healthz returns 200.
+   - /upload renders with “ファイルを選択（複数可）”.
+   - Select 3 different PDFs in the dialog at once → UI shows “3ファイル選択”.
+   - Click “アップロードして解析” → table shows 3 rows; export JSON contains 3 objects; CSV has 3 data rows (+ header).
+   - “クリア” empties the list and disables export buttons.
+
+Important constraints:
+- Do NOT touch FastAPI/ASGI, gunicorn config, or any deployment settings.
+- Keep routes: /upload (page), /api/upload (POST JSON), /settings, /healthz, /selfcheck.
+- Keep response field names in English exactly as they are (amount, date, vendor, confidence, needs_review, raw_excerpt, sheet_status).
+
+Make only the minimal code changes needed to pass the above acceptance tests.
