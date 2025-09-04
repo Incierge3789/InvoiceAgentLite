@@ -102,8 +102,7 @@ class InvoiceProcessor:
                 'https://www.googleapis.com/auth/spreadsheets',
                 'https://www.googleapis.com/auth/drive'
             ]
-            credentials = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
-            self.sheets_client = gspread.authorize(credentials)
+            self.sheets_client = gspread.service_account(filename=None, creds_dict=credentials_dict)
             self.worksheet = self.sheets_client.open_by_key(SHEET_ID).sheet1
             logger.info("Google Sheets service initialized successfully")
         except Exception as e:
@@ -121,16 +120,17 @@ class InvoiceProcessor:
                 text += page.extract_text() + "\n"
             
             return text
-        except PyPDF2.errors.PdfReadError as e:
-            logger.error(f"PDF read error: {e}")
-            raise HTTPException(status_code=422, detail="Invalid PDF file format or password-protected")
         except Exception as e:
             logger.error(f"Error extracting text from PDF: {e}")
-            raise HTTPException(status_code=500, detail="Failed to extract text from PDF")
+            # Check if it's a PDF-specific error
+            if "password" in str(e).lower() or "encrypted" in str(e).lower():
+                raise HTTPException(status_code=422, detail="Invalid PDF file format or password-protected")
+            else:
+                raise HTTPException(status_code=500, detail="Failed to extract text from PDF")
     
-    def extract_amounts(self, text: str) -> Dict[str, float]:
+    def extract_amounts(self, text: str) -> Dict[str, Optional[float]]:
         """Extract subtotal, tax, and total amounts from text"""
-        amounts = {"subtotal": None, "tax": None, "total": None}
+        amounts: Dict[str, Optional[float]] = {"subtotal": None, "tax": None, "total": None}
         
         # Look for specific patterns
         subtotal_patterns = [r"小計[\s:：]*([￥¥]?)([\\d,]+\.?\d*)", r"税抜[\s:：]*([￥¥]?)([\\d,]+\.?\d*)"]
