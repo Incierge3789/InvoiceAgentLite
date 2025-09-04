@@ -749,15 +749,16 @@ def upload_page():
                                         <p class="text-muted">PDFのみ、最大10ファイル（各3MB）</p>
                                     </div>
                                     <input id="fileInput" name="files" type="file" accept="application/pdf" multiple class="d-none">
-                                    <button type="button" class="btn btn-outline-primary" onclick="document.getElementById('fileInput').click()">
+                                    <button type="button" class="btn btn-outline-primary" id="browseAnchor">
                                         📄 ファイルを選択（複数可）
                                     </button>
                                 </div>
                                 
-                                <div id="fileList" class="file-list mb-3"></div>
+                                <div id="selectedCount" class="mb-2"></div>
+                                <div id="selectedList" class="file-list mb-3"></div>
                                 
                                 <div class="d-grid gap-2">
-                                    <button type="button" class="btn btn-primary" id="btnUpload" disabled>
+                                    <button id="uploadBtn" type="button" class="btn btn-primary w-100">
                                         <span class="spinner-border spinner-border-sm me-2 d-none" id="uploadSpinner"></span>
                                         アップロードして解析
                                     </button>
@@ -827,8 +828,9 @@ def upload_page():
         <script>
             const dropZone = document.getElementById('dropZone');
             const fileInput = document.getElementById('fileInput');
-            const fileList = document.getElementById('fileList');
-            const btnUpload = document.getElementById('btnUpload');
+            const listBox = document.getElementById('selectedList');
+            const countBox = document.getElementById('selectedCount');
+            const uploadBtn = document.getElementById('uploadBtn');
             const uploadSpinner = document.getElementById('uploadSpinner');
             const resultContainer = document.getElementById('resultContainer');
             const resultOutput = document.getElementById('resultOutput');
@@ -855,46 +857,42 @@ def upload_page():
             dropZone.addEventListener('drop', (e) => {
                 e.preventDefault();
                 dropZone.classList.remove('dragover');
-                const dropped = Array.from(e.dataTransfer.files);
-                selectedFiles = selectedFiles.concat(dropped.filter(f => f.type === 'application/pdf' || f.name.endsWith('.pdf')));
-                updateSelectedCount();
+                addFiles(e.dataTransfer.files);
             });
             
-            dropZone.addEventListener('click', () => {
-                fileInput.click();
-            });
+            const browseAnchor = document.getElementById('browseAnchor');
+            if (browseAnchor) {
+                browseAnchor.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    fileInput?.click();
+                });
+            }
             
             fileInput.addEventListener('change', (e) => {
-                const picked = Array.from(e.target.files);
-                selectedFiles = selectedFiles.concat(picked);
-                updateSelectedCount();
+                addFiles(e.target.files);
+                e.target.value = '';
             });
 
 
-            function updateSelectedCount() {
-                if (selectedFiles.length === 0) {
-                    fileList.innerHTML = '';
-                    return;
-                }
-                
-                const countText = `${selectedFiles.length}ファイル選択`;
-                const listHtml = selectedFiles.map(file => 
-                    `<div class="d-flex justify-content-between align-items-center border-bottom py-2">
-                        <span>${file.name}</span>
-                        <small class="text-muted">${(file.size / 1024 / 1024).toFixed(2)} MB</small>
-                    </div>`
-                ).join('');
-                
-                fileList.innerHTML = `
-                    <div class="alert alert-info">${countText}</div>
-                    <div class="border rounded p-2">${listHtml}</div>
-                `;
+            function updateButtonState() {
+                uploadBtn.disabled = (selectedFiles.length === 0);
+                uploadBtn.classList.toggle('disabled', selectedFiles.length === 0);
+            }
+            function renderSelected() {
+                if (countBox) countBox.textContent = `${selectedFiles.length}ファイル選択`;
+                if (listBox)  listBox.innerHTML = selectedFiles.map(f => `<div class="small text-muted">${f.name} (${(f.size/1024/1024).toFixed(2)}MB)</div>`).join('');
+            }
+            function addFiles(files) {
+                const pdfs = Array.from(files).filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
+                selectedFiles = selectedFiles.concat(pdfs);
+                renderSelected();
+                updateButtonState();
             }
 
-            btnUpload.addEventListener('click', async () => {
+            uploadBtn.addEventListener('click', async () => {
                 if (selectedFiles.length === 0) return;
                 
-                btnUpload.disabled = true;
+                uploadBtn.disabled = true;
                 uploadSpinner.classList.remove('d-none');
                 
                 try {
@@ -918,7 +916,7 @@ def upload_page():
                 } catch (error) {
                     showError('アップロードエラー: ' + error.message);
                 } finally {
-                    btnUpload.disabled = false;
+                    uploadBtn.disabled = false;
                     uploadSpinner.classList.add('d-none');
                 }
             });
@@ -961,8 +959,9 @@ def upload_page():
                     selectedFiles = [];
                     document.getElementById('fileInput').value = '';
                     resultsBody.innerHTML = '';
-                    updateSelectedCount();
-                    btnUpload.disabled = true;
+                    renderSelected();
+                    updateButtonState();
+                    uploadBtn.disabled = true;
                     resultContainer.classList.add('d-none');
                 } catch (error) {
                     showError('クリアエラー: ' + error.message);
@@ -976,6 +975,9 @@ def upload_page():
                     errorContainer.classList.add('d-none');
                 }, 5000);
             }
+            
+            // Initialize button state
+            updateButtonState();
         </script>
     </body>
     </html>
