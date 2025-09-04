@@ -7,9 +7,10 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 import time
 
-from flask import Flask, request, jsonify, render_template_string, Response, redirect
+from flask import Flask, request, jsonify, render_template_string, Response, redirect, session
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
+import secrets
 
 import PyPDF2
 import io
@@ -142,13 +143,22 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key")
+app.secret_key = os.environ.get("SECRET_KEY", "dev")
 
 # Add CORS
 CORS(app, origins=["*"])
 
-# In-memory storage for current session results
-current_results = []
+# In-memory storage for session results
+_STORE = {}  # { sid: [row, ...] }
+COLS = ["file","date","amount","vendor","confidence","needs_review","raw_excerpt"]
+
+def _sid():
+    if "sid" not in session:
+        session["sid"] = secrets.token_hex(16)
+    return session["sid"]
+
+def _bucket():
+    return _STORE.setdefault(_sid(), [])
 
 # Configuration from environment variables
 SHEET_ID = os.getenv("SHEET_ID", "")
@@ -675,77 +685,6 @@ def download_csv():
         logger.error(f"CSV download error: {e}")
         return jsonify({"error": f"Failed to generate CSV: {str(e)}"}), 500
 
-@app.route("/export/csv", methods=['GET'])
-def export_csv():
-    """Export current results as CSV"""
-    global current_results
-    
-    if not current_results:
-        return jsonify({"error": "No results to export"}), 400
-    
-    try:
-        output = StringIO()
-        writer = csv.writer(output)
-        
-        # Headers
-        headers = ['timestamp', 'file', 'vendor', 'date', 'amount', 'currency', 'category', 'description', 'notes', 'confidence', 'needs_review', 'raw_excerpt', 'source']
-        writer.writerow(headers)
-        
-        # Data rows
-        for result in current_results:
-            timestamp = datetime.now(timezone.utc).isoformat()
-            row = [
-                timestamp,
-                result.get('file', ''),
-                result.get('vendor', ''),
-                result.get('date', ''),
-                result.get('amount', ''),
-                'JPY',
-                '',  # category
-                '',  # description  
-                '',  # notes
-                result.get('confidence', ''),
-                result.get('needs_review', ''),
-                result.get('raw_excerpt', '')[:500],
-                'upload'
-            ]
-            writer.writerow(row)
-        
-        output.seek(0)
-        csv_content = output.getvalue()
-        
-        filename = f"invoice_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        
-        return Response(
-            csv_content,
-            mimetype='text/csv',
-            headers={"Content-disposition": f"attachment; filename={filename}"}
-        )
-        
-    except Exception as e:
-        logger.error(f"CSV export error: {e}")
-        return jsonify({"error": f"Failed to export CSV: {str(e)}"}), 500
-
-@app.route("/export/json", methods=['GET'])
-def export_json():
-    """Export current results as JSON"""
-    global current_results
-    
-    if not current_results:
-        return jsonify({"error": "No results to export"}), 400
-    
-    try:
-        filename = f"invoice_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        
-        return Response(
-            json.dumps(current_results, ensure_ascii=False, indent=2),
-            mimetype='application/json',
-            headers={"Content-disposition": f"attachment; filename={filename}"}
-        )
-        
-    except Exception as e:
-        logger.error(f"JSON export error: {e}")
-        return jsonify({"error": f"Failed to export JSON: {str(e)}"}), 500
 
 @app.route("/", methods=['GET'])
 def index():
@@ -817,7 +756,7 @@ def upload_page():
                                 <div id="fileList" class="file-list mb-3"></div>
                                 
                                 <div class="d-grid gap-2">
-                                    <button type="submit" class="btn btn-primary" id="uploadBtn" disabled>
+                                    <button type="button" class="btn btn-primary" id="btnUpload" disabled>
                                         <span class="spinner-border spinner-border-sm me-2 d-none" id="uploadSpinner"></span>
                                         アップロードして解析
                                     </button>
@@ -831,33 +770,34 @@ def upload_page():
                             <div id="resultContainer" class="mt-4 d-none">
                                 <div class="d-flex justify-content-between align-items-center mb-3">
                                     <h5>解析結果</h5>
-                                    <div id="exportButtons" class="d-none">
-                                        <button type="button" class="btn btn-outline-primary btn-sm me-2" id="exportCsvBtn">
+                                    <div>
+                                        <button type="button" class="btn btn-outline-primary btn-sm me-2" id="btnSaveCsv">
                                             結果をCSVで保存
                                         </button>
-                                        <button type="button" class="btn btn-outline-secondary btn-sm" id="exportJsonBtn">
+                                        <button type="button" class="btn btn-outline-secondary btn-sm me-2" id="btnSaveJson">
                                             結果をJSONで保存
+                                        </button>
+                                        <button type="button" class="btn btn-outline-danger btn-sm" id="btnClear">
+                                            結果をクリア
                                         </button>
                                     </div>
                                 </div>
                                 
-                                <div id="resultTable" class="mb-4 d-none">
-                                    <div class="table-responsive">
-                                        <table class="table table-hover">
-                                            <thead>
-                                                <tr>
-                                                    <th>ファイル</th>
-                                                    <th>日付</th>
-                                                    <th>金額</th>
-                                                    <th>発行元</th>
-                                                    <th>信頼度</th>
-                                                    <th>要確認</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody id="resultTableBody">
-                                            </tbody>
-                                        </table>
-                                    </div>
+                                <div class="table-responsive">
+                                    <table class="table table-hover">
+                                        <thead>
+                                            <tr>
+                                                <th>ファイル</th>
+                                                <th>日付</th>
+                                                <th>金額</th>
+                                                <th>発行元</th>
+                                                <th>信頼度</th>
+                                                <th>要確認</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="resultsBody">
+                                        </tbody>
+                                    </table>
                                 </div>
                                 
                                 <div id="resultSummary" class="alert alert-info mb-3 d-none"></div>
@@ -887,20 +827,16 @@ def upload_page():
             const dropZone = document.getElementById('dropZone');
             const fileInput = document.getElementById('fileInput');
             const fileList = document.getElementById('fileList');
-            const uploadForm = document.getElementById('uploadForm');
-            const uploadBtn = document.getElementById('uploadBtn');
+            const btnUpload = document.getElementById('btnUpload');
             const uploadSpinner = document.getElementById('uploadSpinner');
             const resultContainer = document.getElementById('resultContainer');
             const resultOutput = document.getElementById('resultOutput');
             const errorContainer = document.getElementById('errorContainer');
             const errorMessage = document.getElementById('errorMessage');
-            const downloadCsvBtn = document.getElementById('downloadCsvBtn');
-            const resultSummary = document.getElementById('resultSummary');
-            const resultTable = document.getElementById('resultTable');
-            const resultTableBody = document.getElementById('resultTableBody');
-            const exportButtons = document.getElementById('exportButtons');
-            const exportCsvBtn = document.getElementById('exportCsvBtn');
-            const exportJsonBtn = document.getElementById('exportJsonBtn');
+            const btnSaveCsv = document.getElementById('btnSaveCsv');
+            const btnSaveJson = document.getElementById('btnSaveJson');
+            const btnClear = document.getElementById('btnClear');
+            const resultsBody = document.getElementById('resultsBody');
             
             let selectedFiles = [];
             let lastResult = null;
@@ -948,7 +884,7 @@ def upload_page():
                 });
                 
                 updateFileList();
-                uploadBtn.disabled = selectedFiles.length === 0;
+                btnUpload.disabled = selectedFiles.length === 0;
             }
 
             function updateFileList() {
@@ -967,171 +903,83 @@ def upload_page():
                 fileList.innerHTML = `<div class="border rounded p-2">${listHtml}</div>`;
             }
 
-            uploadForm.addEventListener('submit', async (e) => {
-                e.preventDefault();
-                
+            btnUpload.addEventListener('click', async () => {
                 if (selectedFiles.length === 0) return;
                 
-                // Show loading state
-                uploadBtn.disabled = true;
+                btnUpload.disabled = true;
                 uploadSpinner.classList.remove('d-none');
-                resultContainer.classList.add('d-none');
-                errorContainer.classList.add('d-none');
-                
-                const formData = new FormData();
-                selectedFiles.forEach(file => {
-                    formData.append('files', file);
-                });
                 
                 try {
-                    const response = await fetch('/api/upload', {
-                        method: 'POST',
-                        body: formData
+                    const fd = new FormData();
+                    for (const f of selectedFiles) { 
+                        fd.append('files', f); 
+                    }
+                    
+                    const response = await fetch('/api/upload', { 
+                        method: 'POST', 
+                        body: fd 
                     });
                     
-                    const result = await response.json();
+                    const json = await response.json();
                     
-                    if (response.ok) {
-                        showResults(result);
+                    if (json.ok) {
+                        appendRows(json.results);
+                        resultOutput.textContent = JSON.stringify(json, null, 2);
+                        resultContainer.classList.remove('d-none');
                     } else {
-                        showError(result.error || 'Upload failed');
+                        showError('アップロードに失敗しました: ' + (json.error || '不明なエラー'));
                     }
                 } catch (error) {
-                    showError('Network error: ' + error.message);
+                    showError('アップロードエラー: ' + error.message);
                 } finally {
-                    uploadBtn.disabled = false;
+                    btnUpload.disabled = false;
                     uploadSpinner.classList.add('d-none');
                 }
             });
 
-            function showResults(result) {
-                lastResult = result;
-                
-                // Check if we have multiple results
-                if (result.results && result.results.length > 0) {
-                    // Multiple files - show table
-                    showResultsTable(result.results);
-                    exportButtons.classList.remove('d-none');
-                    resultSummary.classList.add('d-none');
-                } else if (result.date !== undefined || result.amount !== undefined || result.vendor !== undefined) {
-                    // Single file - show summary
-                    const date = result.date || '不明';
-                    const amount = result.amount || '不明';
-                    const vendor = result.vendor || '不明';
-                    const confidence = result.confidence || '不明';
-                    resultSummary.innerHTML = `検出結果：日付=${date} / 金額=${amount}円 / 発行元=${vendor}（信頼度=${confidence}）`;
-                    resultSummary.classList.remove('d-none');
-                    resultTable.classList.add('d-none');
-                }
-                
-                resultOutput.textContent = JSON.stringify(result, null, 2);
-                resultContainer.classList.remove('d-none');
-            }
-            
-            function showResultsTable(results) {
-                resultTableBody.innerHTML = '';
-                
-                results.forEach(result => {
-                    const row = document.createElement('tr');
-                    row.innerHTML = `
-                        <td>${result.file || '不明'}</td>
-                        <td>${result.date || '不明'}</td>
-                        <td>${result.amount ? result.amount + '円' : '不明'}</td>
-                        <td>${result.vendor || '不明'}</td>
+            function appendRows(rows) {
+                rows.forEach(row => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td>${row.file || '不明'}</td>
+                        <td>${row.date || '不明'}</td>
+                        <td>${row.amount ? row.amount + '円' : '不明'}</td>
+                        <td>${row.vendor || '不明'}</td>
                         <td>
-                            <span class="badge ${result.confidence >= 0.8 ? 'bg-success' : result.confidence >= 0.5 ? 'bg-warning' : 'bg-danger'}">
-                                ${result.confidence || '不明'}
+                            <span class="badge ${row.confidence >= 0.8 ? 'bg-success' : row.confidence >= 0.5 ? 'bg-warning' : 'bg-danger'}">
+                                ${row.confidence || '不明'}
                             </span>
                         </td>
                         <td>
-                            <span class="badge ${result.needs_review === 'TRUE' ? 'bg-warning' : 'bg-success'}">
-                                ${result.needs_review === 'TRUE' ? 'はい' : 'いいえ'}
+                            <span class="badge ${row.needs_review === 'TRUE' ? 'bg-warning' : 'bg-success'}">
+                                ${row.needs_review === 'TRUE' ? 'はい' : 'いいえ'}
                             </span>
                         </td>
                     `;
-                    resultTableBody.appendChild(row);
+                    resultsBody.appendChild(tr);
                 });
-                
-                resultTable.classList.remove('d-none');
             }
 
-            // CSV Download functionality
-            downloadCsvBtn.addEventListener('click', async () => {
-                if (!lastResult) return;
-                
-                try {
-                    const response = await fetch('/download_csv', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify(lastResult)
-                    });
-                    
-                    if (response.ok) {
-                        const blob = await response.blob();
-                        const url = window.URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.style.display = 'none';
-                        a.href = url;
-                        a.download = `invoice_${lastResult.file || 'data'}.csv`;
-                        document.body.appendChild(a);
-                        a.click();
-                        window.URL.revokeObjectURL(url);
-                        document.body.removeChild(a);
-                    } else {
-                        showError('CSVダウンロードに失敗しました');
-                    }
-                } catch (error) {
-                    showError('CSVダウンロードエラー: ' + error.message);
-                }
+            // Export buttons
+            btnSaveCsv.addEventListener('click', () => {
+                window.location.href = '/export/csv';
             });
             
-            // Export CSV functionality
-            exportCsvBtn.addEventListener('click', async () => {
-                try {
-                    const response = await fetch('/export/csv');
-                    if (response.ok) {
-                        const blob = await response.blob();
-                        const url = window.URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.style.display = 'none';
-                        a.href = url;
-                        const filename = response.headers.get('Content-Disposition')?.match(/filename="(.+)"/)?.[1] || 'results.csv';
-                        a.download = filename;
-                        document.body.appendChild(a);
-                        a.click();
-                        window.URL.revokeObjectURL(url);
-                        document.body.removeChild(a);
-                    } else {
-                        showError('CSVエクスポートに失敗しました');
-                    }
-                } catch (error) {
-                    showError('CSVエクスポートエラー: ' + error.message);
-                }
+            btnSaveJson.addEventListener('click', () => {
+                window.location.href = '/export/json';
             });
             
-            // Export JSON functionality
-            exportJsonBtn.addEventListener('click', async () => {
+            btnClear.addEventListener('click', async () => {
                 try {
-                    const response = await fetch('/export/json');
-                    if (response.ok) {
-                        const blob = await response.blob();
-                        const url = window.URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.style.display = 'none';
-                        a.href = url;
-                        const filename = response.headers.get('Content-Disposition')?.match(/filename="(.+)"/)?.[1] || 'results.json';
-                        a.download = filename;
-                        document.body.appendChild(a);
-                        a.click();
-                        window.URL.revokeObjectURL(url);
-                        document.body.removeChild(a);
-                    } else {
-                        showError('JSONエクスポートに失敗しました');
-                    }
+                    await fetch('/api/clear', { method: 'POST' });
+                    resultsBody.innerHTML = '';
+                    fileInput.value = '';
+                    selectedFiles = [];
+                    updateFileList();
+                    btnUpload.disabled = true;
+                    resultContainer.classList.add('d-none');
                 } catch (error) {
-                    showError('JSONエクスポートエラー: ' + error.message);
+                    showError('クリアエラー: ' + error.message);
                 }
             });
 
@@ -1151,87 +999,123 @@ def upload_page():
 @app.route("/api/upload", methods=['POST'])
 def upload_files():
     """Process uploaded PDF files"""
-    global current_results
+    files = request.files.getlist("files")
     
-    if 'files' not in request.files:
-        return jsonify({"error": "ファイルがアップロードされていません"}), 400
+    if not files:
+        return jsonify({"ok": False, "error": "ファイルが選択されていません"}), 400
     
-    files = request.files.getlist('files')
-    
-    if not files or files[0].filename == '':
-        return jsonify({"error": "ファイルが選択されていません"}), 400
-    
-    # Validate file count (max 10 files)
+    # Validate file count (max 10 files)  
     if len(files) > 10:
-        return jsonify({"error": "一度に処理できるファイルは最大10個までです"}), 400
+        return jsonify({"ok": False, "error": "一度に処理できるファイルは最大10個までです"}), 400
     
-    # Clear previous results for new upload
-    current_results = []
     results = []
     errors = []
     
     for file in files:
         try:
+            filename = secure_filename(file.filename) if file.filename else "unknown.pdf"
+            
             # Validate file type
             if not allowed_file(file.filename):
-                errors.append(f"ファイル {file.filename}: PDFファイルのみ対応しています。")
+                errors.append(f"ファイル {filename}: PDFファイルのみ対応しています。")
                 continue
-            
+                
             # Read file content
             content = file.read()
             
-            # Validate file size
+            # Validate file size (3MB)
             if len(content) > MAX_FILE_SIZE:
-                errors.append(f"ファイル {file.filename}: ファイルサイズが上限（3MB）を超えています。")
+                errors.append(f"ファイル {filename}: ファイルサイズが上限（3MB）を超えています。")
                 continue
             
-            # Extract text from PDF
-            filename = secure_filename(file.filename) if file.filename else "unknown.pdf"
+            # Extract text from PDF using existing processor
             text = processor.extract_text_from_pdf(content)
             
-            # Use Japanese extraction rules
+            # Use existing Japanese extraction rules
             fields = extract_fields_jp(text)
             
-            # Build result with required keys
-            result = {
-                "ok": True,
+            # Build row dict with all required fields
+            row = {
                 "file": filename,
-                "raw_excerpt": text[:500],
-                **fields
+                "date": fields.get("date"),
+                "amount": fields.get("amount"), 
+                "vendor": fields.get("vendor"),
+                "confidence": fields.get("confidence"),
+                "needs_review": fields.get("needs_review"),
+                "raw_excerpt": text[:500]
             }
             
-            # Try to save to Google Sheets if config is available
+            # Add to session bucket
+            _bucket().append(row)
+            results.append(row)
+            
+            # Try to save to Google Sheets if available
             config = load_config()
             if config.get('service_account_json') and config.get('sheet_id'):
-                sheet_saved = save_row_to_sheet(result)
-                result["sheet_status"] = "saved" if sheet_saved else "error"
-            else:
-                result["sheet_status"] = "not_connected"
-            
-            results.append(result)
-            # Store in current_results for export
-            current_results.append(result)
+                try:
+                    save_row_to_sheet(row)
+                except Exception as e:
+                    logger.error(f"Failed to save to sheets: {e}")
             
         except Exception as e:
             logger.error(f"Error processing file {file.filename}: {e}")
-            errors.append(f"File {file.filename}: Processing failed - {str(e)}")
+            errors.append(f"ファイル {filename}: 処理に失敗しました - {str(e)}")
     
     if errors and not results:
-        return jsonify({"error": "処理に失敗しました", "errors": errors}), 422
+        return jsonify({"ok": False, "error": "処理に失敗しました", "errors": errors}), 422
     
-    # Always return results array for consistency
-    response = {
-        "ok": True,
-        "results": results,
-        "total_files": len(files),
-        "processed_files": len(results),
-        "failed_files": len(errors)
-    }
-    
+    response = {"ok": True, "results": results}
     if errors:
         response["errors"] = errors
-    
+        
     return jsonify(response)
+
+@app.route("/api/clear", methods=['POST'])
+def clear_results():
+    """Clear current session results"""
+    _STORE[_sid()] = []
+    return jsonify({"ok": True})
+
+@app.route("/export/json", methods=['GET'])
+def export_json():
+    """Export current results as JSON"""
+    results = _bucket()
+    if not results:
+        return jsonify({"error": "No results to export"}), 400
+    
+    filename = f"invoices_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    return Response(
+        json.dumps(results, ensure_ascii=False, indent=2),
+        mimetype='application/json',
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+@app.route("/export/csv", methods=['GET']) 
+def export_csv():
+    """Export current results as CSV"""
+    results = _bucket()
+    if not results:
+        return jsonify({"error": "No results to export"}), 400
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Write header
+    writer.writerow(COLS)
+    
+    # Write data rows
+    for row in results:
+        writer.writerow([row.get(col, '') for col in COLS])
+    
+    output.seek(0)
+    csv_content = output.getvalue()
+    
+    filename = f"invoices_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        csv_content,
+        mimetype='text/csv',
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))

@@ -1,0 +1,96 @@
+You are editing my app “InvoiceAgent Lite”.
+
+GOAL
+Fix three issues on /upload:
+- Multiple selection processes only 1 file → must process up to 10 PDFs in one request
+- Cannot clear the current results → add a clear endpoint + UI
+- “Save as CSV/JSON” buttons don’t work → wire to working export endpoints
+
+HARD CONSTRAINTS (do not violate)
+- Do NOT change the framework or server startup. Keep Flask + gunicorn exactly as-is.
+- Do NOT edit .replit, requirements, or deployment settings.
+- Do NOT rename or remove existing routes: /upload, /api/upload, /settings, /healthz, /selfcheck.
+- Keep Google Sheets code untouched.
+- Keep API response keys in English: file, date, amount, vendor, confidence, needs_review, raw_excerpt.
+- Keep the visible UI labels in Japanese as they are.
+
+FILES YOU MAY EDIT ONLY
+- app.py
+- templates/upload.html
+- static/app.js
+
+IMPLEMENTATION
+
+1) templates/upload.html
+- Ensure the file input supports true multi-select:
+  <input id="fileInput" name="files" type="file" multiple accept="application/pdf,.pdf">
+- Add (or keep) buttons with stable IDs:
+  - アップロードして解析 → id="btnUpload"
+  - 結果をCSVで保存 → id="btnSaveCsv"
+  - 結果をJSONで保存 → id="btnSaveJson"
+  - 結果をクリア → id="btnClear"  (add this if missing)
+- Results table must have <tbody id="resultsBody"> for injecting rows.
+- Make sure <script src="/static/app.js"></script> is included at the bottom.
+
+2) static/app.js
+- On “解析” click, build FormData and append ALL selected files:
+    const fd = new FormData();
+    for (const f of document.getElementById('fileInput').files) { fd.append('files', f); }
+    fetch('/api/upload', { method: 'POST', body: fd })
+      .then(r => r.json()).then(json => { if (json.ok) appendRows(json.results); else alert('アップロードに失敗しました'); });
+- Implement appendRows(rows) that adds table rows to #resultsBody using fields:
+  file, date, amount, vendor, confidence, needs_review.
+- Wire buttons:
+  - CSV:  window.location.href = '/export/csv'
+  - JSON: window.location.href = '/export/json'
+  - クリア: fetch('/api/clear', { method: 'POST' }).then(() => { document.getElementById('resultsBody').innerHTML=''; document.getElementById('fileInput').value=''; });
+
+3) app.py  (Flask)
+- Add simple per-session in-memory store. Do NOT change existing endpoints logic; only add the following helpers and endpoints.
+- Helpers:
+    from flask import session
+    import secrets, io, csv
+    app.secret_key = os.environ.get("SECRET_KEY", "dev")
+    _STORE = {}  # { sid: [row, ...] }
+    COLS = ["file","date","amount","vendor","confidence","needs_review","raw_excerpt"]
+
+    def _sid():
+        if "sid" not in session:
+            session["sid"] = secrets.token_hex(16)
+        return session["sid"]
+
+    def _bucket():
+        return _STORE.setdefault(_sid(), [])
+
+- /api/upload (POST) must accept multiple PDFs:
+    files = request.files.getlist("files")
+    For each file:
+      - reject non-PDF or >3MB with item-level error but continue others
+      - run the EXISTING extraction function you already use (reuse current logic) to obtain keys:
+        date, amount, vendor, confidence, needs_review, raw_excerpt
+      - push a dict row to _bucket(): {"file": filename, ...fields}
+    Return: jsonify({ "ok": True, "results": [rows...] })
+
+- /api/clear (POST)
+    _STORE[_sid()] = []
+    return jsonify({ "ok": True })
+
+- /export/json (GET)
+    return jsonify(_bucket())
+
+- /export/csv (GET)
+    Write CSV with header COLS and all rows in _bucket()
+    Return as attachment: Content-Disposition: attachment; filename="invoices.csv"
+
+NOTES
+- Do NOT refactor or rename existing extract code; just call it inside /api/upload for each file.
+- Keep all current Japanese UI text intact; only wire up the IDs and event handlers.
+
+ACCEPTANCE TESTS
+- /upload: select 2–3 PDFs at once → click 解析 → table shows 2–3 rows appended (file/date/amount/vendor/confidence/needs_review).
+- “結果をCSVで保存” downloads a CSV with those rows.
+- “結果をJSONで保存” downloads JSON with those rows.
+- “結果をクリア” empties the table and clears the file input.
+- /healthz still returns 200. No changes to settings/Sheets logic.
+
+Make these changes only. When finished, reload /upload and verify the Acceptance Tests.
