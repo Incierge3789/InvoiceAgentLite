@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 import time
 
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, Response
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
 
@@ -17,6 +17,9 @@ import io
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+import gspread
+import csv
+from io import StringIO
 
 # Japanese invoice extraction rule pack
 import re, unicodedata
@@ -50,6 +53,88 @@ def extract_fields_jp(text: str):
         "confidence": round(score, 2),
         "needs_review": "TRUE" if score < 0.8 else "FALSE",
     }
+
+# Config helpers
+def load_config():
+    """Load config from data/config.json and environment variables"""
+    config = {}
+    
+    # Try to load from data/config.json first
+    try:
+        if os.path.exists('data/config.json'):
+            with open('data/config.json', 'r') as f:
+                config = json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load config.json: {e}")
+    
+    # Override with environment variables if present
+    if os.getenv('GSPREAD_CREDENTIALS_JSON'):
+        config['service_account_json'] = os.getenv('GSPREAD_CREDENTIALS_JSON')
+    if os.getenv('SHEET_ID'):
+        config['sheet_id'] = os.getenv('SHEET_ID')
+    if os.getenv('SHEET_NAME'):
+        config['sheet_name'] = os.getenv('SHEET_NAME')
+        
+    return config
+
+def get_worksheet():
+    """Get worksheet from gspread using current config"""
+    config = load_config()
+    
+    if not config.get('service_account_json') or not config.get('sheet_id'):
+        return None
+    
+    try:
+        creds = service_account.Credentials.from_service_account_info(
+            json.loads(config['service_account_json']),
+            scopes=['https://www.googleapis.com/auth/spreadsheets']
+        )
+        gc = gspread.authorize(creds)
+        sheet = gc.open_by_key(config['sheet_id'])
+        worksheet_name = config.get('sheet_name', 'invoices')
+        
+        try:
+            worksheet = sheet.worksheet(worksheet_name)
+        except gspread.WorksheetNotFound:
+            # Create worksheet if it doesn't exist
+            worksheet = sheet.add_worksheet(title=worksheet_name, rows="1000", cols="20")
+            # Add headers
+            headers = ['timestamp', 'file', 'vendor', 'date', 'amount', 'currency', 'category', 'description', 'notes', 'confidence', 'needs_review', 'raw_excerpt', 'source']
+            worksheet.append_row(headers)
+            
+        return worksheet
+    except Exception as e:
+        logger.error(f"Failed to get worksheet: {e}")
+        return None
+
+def save_row_to_sheet(payload):
+    """Save data to Google Sheets with 13 columns"""
+    worksheet = get_worksheet()
+    if not worksheet:
+        return False
+    
+    try:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        row = [
+            timestamp,
+            payload.get('file', ''),
+            payload.get('vendor', ''),
+            payload.get('date', ''),
+            payload.get('amount', ''),
+            'JPY',
+            '',  # category
+            '',  # description  
+            '',  # notes
+            payload.get('confidence', ''),
+            payload.get('needs_review', ''),
+            payload.get('raw_excerpt', '')[:500],
+            'upload'
+        ]
+        worksheet.append_row(row)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save row to sheet: {e}")
+        return False
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -319,6 +404,257 @@ def self_check():
         logger.error(f"Self-check failed: {e}")
         return jsonify({"error": f"Self-check failed: {str(e)}"}), 500
 
+@app.route("/settings", methods=['GET'])
+def settings_page():
+    """Serve the settings page"""
+    config = load_config()
+    connected = bool(config.get('service_account_json') and config.get('sheet_id'))
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en" data-bs-theme="dark">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>InvoiceAgent Lite - Settings</title>
+        <link href="https://cdn.replit.com/agent/bootstrap-agent-dark-theme.min.css" rel="stylesheet">
+    </head>
+    <body>
+        <div class="container mt-4">
+            <div class="row justify-content-center">
+                <div class="col-lg-8">
+                    <div class="card">
+                        <div class="card-header">
+                            <h1 class="card-title mb-0">Google Sheets Connection</h1>
+                            <p class="card-text mb-0">Configure your Google Sheets integration</p>
+                        </div>
+                        <div class="card-body">
+                            <div class="alert {'alert-success' if connected else 'alert-warning'} mb-4">
+                                <strong>Status:</strong> {'Connected' if connected else 'Not Connected'}
+                                {f'<br><small>Sheet ID: {config.get("sheet_id", "")[:20]}...</small>' if connected else ''}
+                            </div>
+                            
+                            <form id="settingsForm">
+                                <div class="mb-3">
+                                    <label for="serviceAccountJson" class="form-label">Service Account JSON</label>
+                                    <textarea class="form-control" id="serviceAccountJson" rows="8" 
+                                              placeholder="Paste your Google Service Account JSON credentials here...">{'***hidden***' if config.get('service_account_json') else ''}</textarea>
+                                    <div class="form-text">Download from Google Cloud Console → IAM & Admin → Service Accounts</div>
+                                </div>
+                                
+                                <div class="mb-3">
+                                    <label for="sheetId" class="form-label">Sheet ID</label>
+                                    <input type="text" class="form-control" id="sheetId" 
+                                           value="{config.get('sheet_id', '')}" 
+                                           placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms">
+                                    <div class="form-text">Found in your Google Sheets URL</div>
+                                </div>
+                                
+                                <div class="mb-3">
+                                    <label for="sheetName" class="form-label">Sheet Name</label>
+                                    <input type="text" class="form-control" id="sheetName" 
+                                           value="{config.get('sheet_name', 'invoices')}" 
+                                           placeholder="invoices">
+                                    <div class="form-text">Name of the worksheet tab (default: invoices)</div>
+                                </div>
+                                
+                                <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                                    <button type="button" class="btn btn-outline-secondary" id="clearBtn">Clear</button>
+                                    <button type="submit" class="btn btn-primary" id="saveBtn">
+                                        <span class="spinner-border spinner-border-sm me-2 d-none" id="saveSpinner"></span>
+                                        Save & Test
+                                    </button>
+                                </div>
+                            </form>
+                            
+                            <div id="resultContainer" class="mt-4 d-none">
+                                <div class="alert" id="resultAlert"></div>
+                            </div>
+                            
+                            <div class="mt-4">
+                                <a href="/upload" class="btn btn-outline-primary">← Back to Upload</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            const settingsForm = document.getElementById('settingsForm');
+            const saveBtn = document.getElementById('saveBtn');
+            const clearBtn = document.getElementById('clearBtn');
+            const saveSpinner = document.getElementById('saveSpinner');
+            const resultContainer = document.getElementById('resultContainer');
+            const resultAlert = document.getElementById('resultAlert');
+            
+            const serviceAccountJson = document.getElementById('serviceAccountJson');
+            const sheetId = document.getElementById('sheetId');
+            const sheetName = document.getElementById('sheetName');
+
+            settingsForm.addEventListener('submit', async (e) => {{
+                e.preventDefault();
+                
+                saveBtn.disabled = true;
+                saveSpinner.classList.remove('d-none');
+                resultContainer.classList.add('d-none');
+                
+                const formData = {{
+                    service_account_json: serviceAccountJson.value.trim(),
+                    sheet_id: sheetId.value.trim(),
+                    sheet_name: sheetName.value.trim() || 'invoices'
+                }};
+                
+                try {{
+                    const response = await fetch('/settings', {{
+                        method: 'POST',
+                        headers: {{
+                            'Content-Type': 'application/json'
+                        }},
+                        body: JSON.stringify(formData)
+                    }});
+                    
+                    const result = await response.json();
+                    
+                    if (response.ok && result.ok) {{
+                        resultAlert.className = 'alert alert-success';
+                        resultAlert.textContent = 'Settings saved and tested successfully!';
+                        setTimeout(() => location.reload(), 1500);
+                    }} else {{
+                        resultAlert.className = 'alert alert-danger';
+                        resultAlert.textContent = result.error || 'Save failed';
+                    }}
+                    
+                    resultContainer.classList.remove('d-none');
+                }} catch (error) {{
+                    resultAlert.className = 'alert alert-danger';
+                    resultAlert.textContent = 'Network error: ' + error.message;
+                    resultContainer.classList.remove('d-none');
+                }} finally {{
+                    saveBtn.disabled = false;
+                    saveSpinner.classList.add('d-none');
+                }}
+            }});
+
+            clearBtn.addEventListener('click', () => {{
+                if (confirm('Clear all settings?')) {{
+                    serviceAccountJson.value = '';
+                    sheetId.value = '';
+                    sheetName.value = 'invoices';
+                }}
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    return html_content
+
+@app.route("/settings", methods=['POST'])
+def save_settings():
+    """Save settings and test connection"""
+    try:
+        data = request.get_json()
+        
+        if not data.get('service_account_json') or not data.get('sheet_id'):
+            return jsonify({"error": "Service Account JSON and Sheet ID are required"}), 400
+        
+        # Validate JSON format
+        try:
+            json.loads(data['service_account_json'])
+        except json.JSONDecodeError:
+            return jsonify({"error": "Invalid JSON format in Service Account"}), 400
+        
+        # Save to config file
+        os.makedirs('data', exist_ok=True)
+        with open('data/config.json', 'w') as f:
+            json.dump(data, f, indent=2)
+        
+        # Test connection
+        try:
+            creds = service_account.Credentials.from_service_account_info(
+                json.loads(data['service_account_json']),
+                scopes=['https://www.googleapis.com/auth/spreadsheets']
+            )
+            gc = gspread.authorize(creds)
+            sheet = gc.open_by_key(data['sheet_id'])
+            worksheet_name = data.get('sheet_name', 'invoices')
+            
+            try:
+                worksheet = sheet.worksheet(worksheet_name)
+            except gspread.WorksheetNotFound:
+                worksheet = sheet.add_worksheet(title=worksheet_name, rows="1000", cols="20")
+                headers = ['timestamp', 'file', 'vendor', 'date', 'amount', 'currency', 'category', 'description', 'notes', 'confidence', 'needs_review', 'raw_excerpt', 'source']
+                worksheet.append_row(headers)
+            
+            # Test with a quick row insertion and deletion
+            test_timestamp = datetime.now(timezone.utc).isoformat()
+            test_row = ['invoiceagent:test', test_timestamp]
+            worksheet.append_row(test_row)
+            
+            # Find and delete the test row
+            rows = worksheet.get_all_values()
+            for i, row in enumerate(rows):
+                if len(row) >= 2 and row[0] == 'invoiceagent:test' and row[1] == test_timestamp:
+                    worksheet.delete_rows(i + 1)
+                    break
+            
+            return jsonify({"ok": True, "message": "Settings saved and connection tested successfully"})
+            
+        except Exception as e:
+            return jsonify({"error": f"Connection test failed: {str(e)}"}), 400
+        
+    except Exception as e:
+        logger.error(f"Settings save error: {e}")
+        return jsonify({"error": f"Failed to save settings: {str(e)}"}), 500
+
+@app.route("/download_csv", methods=['POST'])
+def download_csv():
+    """Generate CSV download for a single result"""
+    try:
+        data = request.get_json()
+        
+        # Create CSV content with 13 columns
+        output = StringIO()
+        writer = csv.writer(output)
+        
+        # Headers
+        headers = ['timestamp', 'file', 'vendor', 'date', 'amount', 'currency', 'category', 'description', 'notes', 'confidence', 'needs_review', 'raw_excerpt', 'source']
+        writer.writerow(headers)
+        
+        # Data row
+        timestamp = datetime.now(timezone.utc).isoformat()
+        row = [
+            timestamp,
+            data.get('file', ''),
+            data.get('vendor', ''),
+            data.get('date', ''),
+            data.get('amount', ''),
+            'JPY',
+            '',  # category
+            '',  # description  
+            '',  # notes
+            data.get('confidence', ''),
+            data.get('needs_review', ''),
+            data.get('raw_excerpt', '')[:500],
+            'upload'
+        ]
+        writer.writerow(row)
+        
+        output.seek(0)
+        csv_content = output.getvalue()
+        
+        filename = f"invoice_{data.get('file', 'data')}.csv"
+        
+        return Response(
+            csv_content,
+            mimetype='text/csv',
+            headers={"Content-disposition": f"attachment; filename={filename}"}
+        )
+        
+    except Exception as e:
+        logger.error(f"CSV download error: {e}")
+        return jsonify({"error": f"Failed to generate CSV: {str(e)}"}), 500
+
 @app.route("/upload", methods=['GET'])
 def upload_page():
     """Serve the upload page"""
@@ -358,9 +694,12 @@ def upload_page():
             <div class="row justify-content-center">
                 <div class="col-lg-8">
                     <div class="card">
-                        <div class="card-header">
-                            <h1 class="card-title mb-0">InvoiceAgent Lite</h1>
-                            <p class="card-text mb-0">Upload PDF invoices to extract financial data</p>
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <div>
+                                <h1 class="card-title mb-0">InvoiceAgent Lite</h1>
+                                <p class="card-text mb-0">Upload PDF invoices to extract financial data</p>
+                            </div>
+                            <a href="/settings" class="btn btn-outline-secondary btn-sm">⚙️ Settings</a>
                         </div>
                         <div class="card-body">
                             <form id="uploadForm">
@@ -389,7 +728,12 @@ def upload_page():
                             </form>
                             
                             <div id="resultContainer" class="mt-4 d-none">
-                                <h5>Processing Results</h5>
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <h5>Processing Results</h5>
+                                    <button type="button" class="btn btn-outline-primary btn-sm d-none" id="downloadCsvBtn">
+                                        📥 Download CSV
+                                    </button>
+                                </div>
                                 <pre id="resultOutput" class="result-container bg-body-secondary p-3 rounded"></pre>
                             </div>
                             
@@ -423,8 +767,10 @@ def upload_page():
             const resultOutput = document.getElementById('resultOutput');
             const errorContainer = document.getElementById('errorContainer');
             const errorMessage = document.getElementById('errorMessage');
+            const downloadCsvBtn = document.getElementById('downloadCsvBtn');
             
             let selectedFiles = [];
+            let lastResult = null;
 
             // Drag and drop functionality
             dropZone.addEventListener('dragover', (e) => {
@@ -521,9 +867,49 @@ def upload_page():
             });
 
             function showResults(result) {
+                lastResult = result;
                 resultOutput.textContent = JSON.stringify(result, null, 2);
                 resultContainer.classList.remove('d-none');
+                
+                // Show CSV download button if sheets not connected
+                if (result.sheet_status === 'not_connected') {
+                    downloadCsvBtn.classList.remove('d-none');
+                } else {
+                    downloadCsvBtn.classList.add('d-none');
+                }
             }
+
+            // CSV Download functionality
+            downloadCsvBtn.addEventListener('click', async () => {
+                if (!lastResult) return;
+                
+                try {
+                    const response = await fetch('/download_csv', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(lastResult)
+                    });
+                    
+                    if (response.ok) {
+                        const blob = await response.blob();
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.style.display = 'none';
+                        a.href = url;
+                        a.download = `invoice_${lastResult.file || 'data'}.csv`;
+                        document.body.appendChild(a);
+                        a.click();
+                        window.URL.revokeObjectURL(url);
+                        document.body.removeChild(a);
+                    } else {
+                        showError('Failed to download CSV');
+                    }
+                } catch (error) {
+                    showError('Error downloading CSV: ' + error.message);
+                }
+            });
 
             function showError(message) {
                 errorMessage.textContent = message;
@@ -582,6 +968,14 @@ def upload_files():
                 "raw_excerpt": text[:500],
                 **fields
             }
+            
+            # Try to save to Google Sheets if config is available
+            config = load_config()
+            if config.get('service_account_json') and config.get('sheet_id'):
+                sheet_saved = save_row_to_sheet(result)
+                result["sheet_status"] = "saved" if sheet_saved else "error"
+            else:
+                result["sheet_status"] = "not_connected"
             
             results.append(result)
             

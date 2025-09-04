@@ -1,0 +1,40 @@
+Add a self-serve “Google Sheets connection” to InvoiceAgent Lite:
+
+1) Dependencies
+- Ensure `gspread` and `google-auth` are installed.
+
+2) Config persistence
+- Create `data/` if not exists and add `.gitignore` entry to exclude `data/`.
+- Read settings in this priority:
+  A) data/config.json (keys: service_account_json, sheet_id, sheet_name)
+  B) env vars: GSPREAD_CREDENTIALS_JSON, SHEET_ID, SHEET_NAME
+- Add helper:
+  - load_config(): returns dict merged from A/B
+  - get_worksheet(): build Credentials.from_service_account_info(json.loads(service_account_json)), open_by_key(sheet_id), worksheet(sheet_name)
+
+3) Save-to-Sheets
+- Implement save_row_to_sheet(payload) that appends 13 columns:
+  [timestamp_utc_iso, file, vendor, date, amount, "JPY", "", "", "", confidence, needs_review, raw_excerpt[:500], "upload"]
+- In upload handler: after extraction, if config is present, call save_row_to_sheet(payload). If not present, skip silently and include `"sheet_status": "not_connected"` in JSON.
+
+4) Settings UI (/settings)
+- Dark theme page with a simple form:
+  - Textarea: “Service Account JSON”
+  - Input: “Sheet ID”
+  - Input: “Sheet Name” (default: invoices)
+  - Buttons: [Save & Test], [Clear]
+- POST /settings: write data/config.json (create file if not exists), then run a quick test: open sheet and append a tiny test row `[“invoiceagent:test”, now]` (and delete it immediately), return {ok:true} or error message.
+- GET /settings returns current connection status (connected/not connected).
+
+5) CSV fallback
+- On the result screen, if Sheets not connected, show a “Download CSV” button that streams a one-line CSV of the just-processed payload with the same 13 columns.
+
+6) Security/UX
+- Add `.gitignore` entry for `data/` folder.
+- Do not log service_account_json.
+- Keep all existing endpoints and FastAPI/Flask framework unchanged.
+- Provide a short README section "How to connect your Google Sheets" with 3 steps for buyers.
+
+Finally, test end-to-end:
+- Visit /settings, paste a real service account JSON, sheet id, name → Save & Test should return ok.
+- Upload a PDF and confirm a new row is added to the sheet. Paste the console/log snippet of the success.
