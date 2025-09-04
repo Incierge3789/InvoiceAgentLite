@@ -1,0 +1,85 @@
+【依頼】InvoiceAgent Lite（PDF→抽出→Googleスプレッド）を FastAPI で実装して、Autoscale で動くWebアプリを作ってください。
+
+# 目的
+- PDF請求書をアップロード → テキスト抽出 → 金額/日付/発行元を推定 → Googleスプレッドに1行追記。
+- Lite版（買切り）なので OCR やメール取込・Slack連携は不要。テキストPDF中心の簡易抽出でOK。
+
+# 技術スタック
+- Python + FastAPI、uvicorn
+- 依存: fastapi, uvicorn[standard], pdfminer.six, google-api-python-client, google-auth, python-multipart
+- Replit Deploy: Autoscale（小構成で可）
+
+# Secrets（必ず使用）
+- SHEET_ID                : 追記先のGoogleスプレッドシートID
+- GOOGLE_SERVICE_ACCOUNT_JSON : サービスアカウントのJSON（文字列そのまま）
+- ADMIN_PASSWORD          : /selfcheck 用の簡易パス（任意）
+※ OAuth は使わずサービスアカウントで書き込み。スプレッドはこのSAに「編集者」で共有済み前提。
+
+# スプレッドの列（見出し例）
+timestamp, filename, vendor, issue_date, amount, confidence, needs_review, raw_excerpt
+
+# 要件
+1) エンドポイント
+   - GET /healthz : {ok:true} を返す
+   - GET /selfcheck?pw=... : 認証後、上の列に自己テスト1行を追記して JSON返却
+   - GET /upload : シンプルなアップロード画面（HTML1枚・ドラッグ&ドロップ/複数選択→/api/uploadにPOST）
+   - POST /api/upload : PDF(複数可)を受けて処理結果のJSONを返す
+2) アップロード制限
+   - PDFのみ許可（MIME/拡張子チェック）
+   - 1ファイル最大 3MB（Liteの想定負荷）
+   - 処理後は一時ファイルを必ず削除。サーバ側にPDFは保存しない。
+3) 抽出ロジック（pdfminer.sixでテキスト抽出）
+   - amount（いずれか最初にヒット）:
+     - r"合計[\\s:：]*([\\d,]+\\.?\\d*)"
+     - r"請求金額[\\s:：]*([\\d,]+\\.?\\d*)"
+     - r"¥\\s?([\\d,]+)"
+     - r"JPY\\s?([\\d,]+)"
+   - issue_date（最初にヒット）:
+     - r"発行日[:：]?\\s?(\\d{4}[/-]\\d{1,2}[/-]\\d{1,2})"
+     - r"(\\d{4}[.-]\\d{1,2}[.-]\\d{1,2})"
+     - r"(\\d{4}年\\d{1,2}月\\d{1,2}日)"
+     - ISO(YYYY-MM-DD)に正規化（“年/月/日”や '.' '/' は '-' に置換）
+   - vendor（候補）
+     - 事前ヒントに一致する語があれば採用（["Amazon","Google","Meta","Facebook","Slack","Cloudflare","ヤマト運輸","日本郵便","佐川急便","楽天","LINE"] など）
+     - なければ本文の先頭10行から社名らしい塊を素朴抽出（英数・日本語の連続文字列を候補に1件）
+   - confidence（0.00〜1.00）
+     - 3項目(amount/date/vendor)の取得ヒット数 / 3 を小数2桁に丸め
+   - needs_review
+     - confidence < 0.67 なら "TRUE"、それ以外は "FALSE"
+   - raw_excerpt
+     - 先頭200文字（長ければ末尾に "..."）
+4) Sheets追記
+   - 1ファイルにつき1行。`timestamp=UTC ISO` / その他は上記値。
+   - Google Sheets API は service account の credentials で呼ぶ。
+5) レスポンス
+   - /api/upload: { ok:true, results:[ {file, vendor, date, amount, confidence, needs_review} ... ] }
+6) エラーハンドリング
+   - 不正MIME/拡張子, サイズ超過, 解析失敗は 400/422 等でJSONエラー返却
+   - サーバ例外は 500 でメッセージを簡潔に
+7) フロント（/upload）
+   - HTML1枚でOK。input type="file" multiple / accept="application/pdf"
+   - fetch で /api/upload に FormData POST、結果JSONを <pre> に表示
+   - 見た目は素朴でよい（Tailwind等は不要）
+
+# コード構成（例）
+- requirements.txt（上記依存を記載）
+- main.py（FastAPI本体・ロジック・エンドポイントすべて）
+- （任意）/static なし。HTMLは /upload の返却文字列でOK。
+
+# 実装詳細メモ
+- サービスアカウントJSONは Replit Secrets から文字列で読み、`json.loads` で dict に変換。
+- pdfminer は tempfile.NamedTemporaryFile へ書いてから読み取る。
+- 文字列正規化：金額はカンマ除去→float化。日付は ISO 変換に try/except を入れる。
+- すべての一時ファイルは finally で削除すること。
+- ログは標準出力に最低限（ファイル名/処理ms/抽出ヒット数）。
+
+# 完了条件（Definition of Done）
+- /healthz が 200 で {ok:true}
+- /selfcheck?pw=ADMIN_PASSWORD の実行でシートに行が1つ増える
+- /upload からPDFを複数投げると、シートに行が追加され、API応答JSONに抽出結果が入る
+- Replit の Autoscale Deployment に配置し、健康チェックパスを /healthz に設定
+- README.md に「Secrets の入れ方 / シート共有方法 / 上限値 / 想定する失敗時の対処」を明記
+
+# 仕上げ
+- すべてのコードを書いたら、そのまま動く状態で提示。requirements.txt も忘れずに。
+- テスト用のダミーPDF（テキスト埋め込みの簡易請求書）を1枚生成し、アップロード検証ができるようにする。
