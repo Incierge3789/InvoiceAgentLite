@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 import time
 
-from flask import Flask, request, jsonify, render_template_string, Response
+from flask import Flask, request, jsonify, render_template_string, Response, redirect
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
 
@@ -146,6 +146,9 @@ app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key")
 
 # Add CORS
 CORS(app, origins=["*"])
+
+# In-memory storage for current session results
+current_results = []
 
 # Configuration from environment variables
 SHEET_ID = os.getenv("SHEET_ID", "")
@@ -412,11 +415,11 @@ def settings_page():
     
     html_content = f"""
     <!DOCTYPE html>
-    <html lang="en" data-bs-theme="dark">
+    <html lang="ja" data-bs-theme="dark">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>InvoiceAgent Lite - Settings</title>
+        <title>インボイス自動読取 Lite - 設定</title>
         <link href="https://cdn.replit.com/agent/bootstrap-agent-dark-theme.min.css" rel="stylesheet">
     </head>
     <body>
@@ -425,44 +428,53 @@ def settings_page():
                 <div class="col-lg-8">
                     <div class="card">
                         <div class="card-header">
-                            <h1 class="card-title mb-0">Google Sheets Connection</h1>
-                            <p class="card-text mb-0">Configure your Google Sheets integration</p>
+                            <h1 class="card-title mb-0">Googleスプレッドシート連携</h1>
+                            <p class="card-text mb-0">Googleスプレッドシートとの連携を設定します</p>
                         </div>
                         <div class="card-body">
                             <div class="alert {'alert-success' if connected else 'alert-warning'} mb-4">
-                                <strong>Status:</strong> {'Connected' if connected else 'Not Connected'}
+                                <strong>状態:</strong> {'接続済み' if connected else '未接続'}
                                 {f'<br><small>Sheet ID: {config.get("sheet_id", "")[:20]}...</small>' if connected else ''}
                             </div>
                             
                             <form id="settingsForm">
                                 <div class="mb-3">
-                                    <label for="serviceAccountJson" class="form-label">Service Account JSON</label>
+                                    <label for="serviceAccountJson" class="form-label">サービスアカウントJSON</label>
                                     <textarea class="form-control" id="serviceAccountJson" rows="8" 
-                                              placeholder="Paste your Google Service Account JSON credentials here...">{'***hidden***' if config.get('service_account_json') else ''}</textarea>
-                                    <div class="form-text">Download from Google Cloud Console → IAM & Admin → Service Accounts</div>
+                                              placeholder="GoogleサービスアカウントのJSONキーをここに貼り付けてください...">{'***hidden***' if config.get('service_account_json') else ''}</textarea>
+                                    <div class="form-text">Google Cloud Console → IAM & Admin → Service Accounts からダウンロード</div>
                                 </div>
                                 
                                 <div class="mb-3">
-                                    <label for="sheetId" class="form-label">Sheet ID</label>
+                                    <label for="sheetId" class="form-label">シートID</label>
                                     <input type="text" class="form-control" id="sheetId" 
                                            value="{config.get('sheet_id', '')}" 
                                            placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms">
-                                    <div class="form-text">Found in your Google Sheets URL</div>
+                                    <div class="form-text">GoogleスプレッドシートのURLから取得</div>
                                 </div>
                                 
                                 <div class="mb-3">
-                                    <label for="sheetName" class="form-label">Sheet Name</label>
+                                    <label for="sheetName" class="form-label">シート名</label>
                                     <input type="text" class="form-control" id="sheetName" 
                                            value="{config.get('sheet_name', 'invoices')}" 
                                            placeholder="invoices">
-                                    <div class="form-text">Name of the worksheet tab (default: invoices)</div>
+                                    <div class="form-text">ワークシートのタブ名（デフォルト: invoices）</div>
+                                </div>
+                                
+                                <div class="alert alert-info mb-3">
+                                    <strong>設定手順:</strong>
+                                    <ol class="mb-0 mt-2">
+                                        <li>Google Cloud でサービスアカウントのJSONキーを作成</li>
+                                        <li>対象スプレッドシートにサービスアカウントのメールを「編集者」で共有</li>
+                                        <li>シートID（URLの /d/ と /edit の間）とシート名（タブ名）を入力して保存</li>
+                                    </ol>
                                 </div>
                                 
                                 <div class="d-grid gap-2 d-md-flex justify-content-md-end">
-                                    <button type="button" class="btn btn-outline-secondary" id="clearBtn">Clear</button>
+                                    <button type="button" class="btn btn-outline-secondary" id="clearBtn">クリア</button>
                                     <button type="submit" class="btn btn-primary" id="saveBtn">
                                         <span class="spinner-border spinner-border-sm me-2 d-none" id="saveSpinner"></span>
-                                        Save & Test
+                                        保存して接続テスト
                                     </button>
                                 </div>
                             </form>
@@ -472,7 +484,7 @@ def settings_page():
                             </div>
                             
                             <div class="mt-4">
-                                <a href="/upload" class="btn btn-outline-primary">← Back to Upload</a>
+                                <a href="/upload" class="btn btn-outline-primary">← アップロード画面に戻る</a>
                             </div>
                         </div>
                     </div>
@@ -518,17 +530,25 @@ def settings_page():
                     
                     if (response.ok && result.ok) {{
                         resultAlert.className = 'alert alert-success';
-                        resultAlert.textContent = 'Settings saved and tested successfully!';
+                        resultAlert.textContent = '接続に成功しました。テスト行を書き込み後に削除しました。';
                         setTimeout(() => location.reload(), 1500);
                     }} else {{
                         resultAlert.className = 'alert alert-danger';
-                        resultAlert.textContent = result.error || 'Save failed';
+                        let errorMsg = result.error || '保存に失敗しました';
+                        if (errorMsg.includes('permission') || errorMsg.includes('Permission')) {{
+                            errorMsg = '権限エラー：スプレッドシートでサービスアカウントに編集権限を付与してください。';
+                        }} else if (errorMsg.includes('JSON') || errorMsg.includes('parse')) {{
+                            errorMsg = 'フォーマットエラー：有効なJSONではありません。';
+                        }} else if (errorMsg.includes('not found') || errorMsg.includes('Sheet')) {{
+                            errorMsg = 'シートが見つかりません。シートID/シート名を確認してください。';
+                        }}
+                        resultAlert.textContent = errorMsg;
                     }}
                     
                     resultContainer.classList.remove('d-none');
                 }} catch (error) {{
                     resultAlert.className = 'alert alert-danger';
-                    resultAlert.textContent = 'Network error: ' + error.message;
+                    resultAlert.textContent = 'ネットワークエラー: ' + error.message;
                     resultContainer.classList.remove('d-none');
                 }} finally {{
                     saveBtn.disabled = false;
@@ -655,16 +675,93 @@ def download_csv():
         logger.error(f"CSV download error: {e}")
         return jsonify({"error": f"Failed to generate CSV: {str(e)}"}), 500
 
+@app.route("/export/csv", methods=['GET'])
+def export_csv():
+    """Export current results as CSV"""
+    global current_results
+    
+    if not current_results:
+        return jsonify({"error": "No results to export"}), 400
+    
+    try:
+        output = StringIO()
+        writer = csv.writer(output)
+        
+        # Headers
+        headers = ['timestamp', 'file', 'vendor', 'date', 'amount', 'currency', 'category', 'description', 'notes', 'confidence', 'needs_review', 'raw_excerpt', 'source']
+        writer.writerow(headers)
+        
+        # Data rows
+        for result in current_results:
+            timestamp = datetime.now(timezone.utc).isoformat()
+            row = [
+                timestamp,
+                result.get('file', ''),
+                result.get('vendor', ''),
+                result.get('date', ''),
+                result.get('amount', ''),
+                'JPY',
+                '',  # category
+                '',  # description  
+                '',  # notes
+                result.get('confidence', ''),
+                result.get('needs_review', ''),
+                result.get('raw_excerpt', '')[:500],
+                'upload'
+            ]
+            writer.writerow(row)
+        
+        output.seek(0)
+        csv_content = output.getvalue()
+        
+        filename = f"invoice_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        return Response(
+            csv_content,
+            mimetype='text/csv',
+            headers={"Content-disposition": f"attachment; filename={filename}"}
+        )
+        
+    except Exception as e:
+        logger.error(f"CSV export error: {e}")
+        return jsonify({"error": f"Failed to export CSV: {str(e)}"}), 500
+
+@app.route("/export/json", methods=['GET'])
+def export_json():
+    """Export current results as JSON"""
+    global current_results
+    
+    if not current_results:
+        return jsonify({"error": "No results to export"}), 400
+    
+    try:
+        filename = f"invoice_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+        return Response(
+            json.dumps(current_results, ensure_ascii=False, indent=2),
+            mimetype='application/json',
+            headers={"Content-disposition": f"attachment; filename={filename}"}
+        )
+        
+    except Exception as e:
+        logger.error(f"JSON export error: {e}")
+        return jsonify({"error": f"Failed to export JSON: {str(e)}"}), 500
+
+@app.route("/", methods=['GET'])
+def index():
+    """Redirect to upload page"""
+    return redirect('/upload')
+
 @app.route("/upload", methods=['GET'])
 def upload_page():
     """Serve the upload page"""
     html_content = """
     <!DOCTYPE html>
-    <html lang="en" data-bs-theme="dark">
+    <html lang="ja" data-bs-theme="dark">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>InvoiceAgent Lite - PDF Upload</title>
+        <title>インボイス自動読取 Lite - PDF アップロード</title>
         <link href="https://cdn.replit.com/agent/bootstrap-agent-dark-theme.min.css" rel="stylesheet">
         <style>
             .drop-zone {
@@ -696,10 +793,10 @@ def upload_page():
                     <div class="card">
                         <div class="card-header d-flex justify-content-between align-items-center">
                             <div>
-                                <h1 class="card-title mb-0">InvoiceAgent Lite</h1>
-                                <p class="card-text mb-0">Upload PDF invoices to extract financial data</p>
+                                <h1 class="card-title mb-0">インボイス自動読取 Lite</h1>
+                                <p class="card-text mb-0">PDFの請求書から自動でデータを抽出します</p>
                             </div>
-                            <a href="/settings" class="btn btn-outline-secondary btn-sm">⚙️ Settings</a>
+                            <a href="/settings" class="btn btn-outline-secondary btn-sm">⚙️ 設定</a>
                         </div>
                         <div class="card-body">
                             <form id="uploadForm">
@@ -708,12 +805,12 @@ def upload_page():
                                         <svg width="48" height="48" fill="currentColor" class="mb-3">
                                             <use href="#upload-icon"/>
                                         </svg>
-                                        <h5>Drop PDF files here or click to browse</h5>
-                                        <p class="text-muted">Maximum 3MB per file, PDF format only</p>
+                                        <h5>ここにPDFをドラッグ＆ドロップ、またはクリックして選択</h5>
+                                        <p class="text-muted">PDFのみ、最大10ファイル（各3MB）</p>
                                     </div>
                                     <input type="file" id="fileInput" multiple accept="application/pdf" class="d-none">
                                     <button type="button" class="btn btn-outline-primary" onclick="document.getElementById('fileInput').click()">
-                                        Browse Files
+                                        📄 ファイルを選択（複数可）
                                     </button>
                                 </div>
                                 
@@ -722,18 +819,48 @@ def upload_page():
                                 <div class="d-grid gap-2">
                                     <button type="submit" class="btn btn-primary" id="uploadBtn" disabled>
                                         <span class="spinner-border spinner-border-sm me-2 d-none" id="uploadSpinner"></span>
-                                        Upload and Process
+                                        アップロードして解析
                                     </button>
+                                </div>
+                                
+                                <div class="mt-2">
+                                    <small class="text-muted">※アップロードされたファイルはサーバーに保存せず、解析後に破棄します。</small>
                                 </div>
                             </form>
                             
                             <div id="resultContainer" class="mt-4 d-none">
-                                <div class="d-flex justify-content-between align-items-center mb-2">
-                                    <h5>Processing Results</h5>
-                                    <button type="button" class="btn btn-outline-primary btn-sm d-none" id="downloadCsvBtn">
-                                        📥 Download CSV
-                                    </button>
+                                <div class="d-flex justify-content-between align-items-center mb-3">
+                                    <h5>解析結果</h5>
+                                    <div id="exportButtons" class="d-none">
+                                        <button type="button" class="btn btn-outline-primary btn-sm me-2" id="exportCsvBtn">
+                                            結果をCSVで保存
+                                        </button>
+                                        <button type="button" class="btn btn-outline-secondary btn-sm" id="exportJsonBtn">
+                                            結果をJSONで保存
+                                        </button>
+                                    </div>
                                 </div>
+                                
+                                <div id="resultTable" class="mb-4 d-none">
+                                    <div class="table-responsive">
+                                        <table class="table table-hover">
+                                            <thead>
+                                                <tr>
+                                                    <th>ファイル</th>
+                                                    <th>日付</th>
+                                                    <th>金額</th>
+                                                    <th>発行元</th>
+                                                    <th>信頼度</th>
+                                                    <th>要確認</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="resultTableBody">
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                                
+                                <div id="resultSummary" class="alert alert-info mb-3 d-none"></div>
                                 <pre id="resultOutput" class="result-container bg-body-secondary p-3 rounded"></pre>
                             </div>
                             
@@ -768,6 +895,12 @@ def upload_page():
             const errorContainer = document.getElementById('errorContainer');
             const errorMessage = document.getElementById('errorMessage');
             const downloadCsvBtn = document.getElementById('downloadCsvBtn');
+            const resultSummary = document.getElementById('resultSummary');
+            const resultTable = document.getElementById('resultTable');
+            const resultTableBody = document.getElementById('resultTableBody');
+            const exportButtons = document.getElementById('exportButtons');
+            const exportCsvBtn = document.getElementById('exportCsvBtn');
+            const exportJsonBtn = document.getElementById('exportJsonBtn');
             
             let selectedFiles = [];
             let lastResult = null;
@@ -797,13 +930,18 @@ def upload_page():
             });
 
             function handleFiles(files) {
+                if (files.length > 10) {
+                    showError('一度に処理できるファイルは最大10個までです。');
+                    return;
+                }
+                
                 selectedFiles = Array.from(files).filter(file => {
                     if (file.type !== 'application/pdf') {
-                        showError(`File ${file.name} is not a PDF`);
+                        showError(`ファイル ${file.name} - PDFファイルのみ対応しています。`);
                         return false;
                     }
                     if (file.size > 3 * 1024 * 1024) {
-                        showError(`File ${file.name} exceeds 3MB limit`);
+                        showError(`ファイル ${file.name} - ファイルサイズが上限（3MB）を超えています。`);
                         return false;
                     }
                     return true;
@@ -868,15 +1006,53 @@ def upload_page():
 
             function showResults(result) {
                 lastResult = result;
+                
+                // Check if we have multiple results
+                if (result.results && result.results.length > 0) {
+                    // Multiple files - show table
+                    showResultsTable(result.results);
+                    exportButtons.classList.remove('d-none');
+                    resultSummary.classList.add('d-none');
+                } else if (result.date !== undefined || result.amount !== undefined || result.vendor !== undefined) {
+                    // Single file - show summary
+                    const date = result.date || '不明';
+                    const amount = result.amount || '不明';
+                    const vendor = result.vendor || '不明';
+                    const confidence = result.confidence || '不明';
+                    resultSummary.innerHTML = `検出結果：日付=${date} / 金額=${amount}円 / 発行元=${vendor}（信頼度=${confidence}）`;
+                    resultSummary.classList.remove('d-none');
+                    resultTable.classList.add('d-none');
+                }
+                
                 resultOutput.textContent = JSON.stringify(result, null, 2);
                 resultContainer.classList.remove('d-none');
+            }
+            
+            function showResultsTable(results) {
+                resultTableBody.innerHTML = '';
                 
-                // Show CSV download button if sheets not connected
-                if (result.sheet_status === 'not_connected') {
-                    downloadCsvBtn.classList.remove('d-none');
-                } else {
-                    downloadCsvBtn.classList.add('d-none');
-                }
+                results.forEach(result => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${result.file || '不明'}</td>
+                        <td>${result.date || '不明'}</td>
+                        <td>${result.amount ? result.amount + '円' : '不明'}</td>
+                        <td>${result.vendor || '不明'}</td>
+                        <td>
+                            <span class="badge ${result.confidence >= 0.8 ? 'bg-success' : result.confidence >= 0.5 ? 'bg-warning' : 'bg-danger'}">
+                                ${result.confidence || '不明'}
+                            </span>
+                        </td>
+                        <td>
+                            <span class="badge ${result.needs_review === 'TRUE' ? 'bg-warning' : 'bg-success'}">
+                                ${result.needs_review === 'TRUE' ? 'はい' : 'いいえ'}
+                            </span>
+                        </td>
+                    `;
+                    resultTableBody.appendChild(row);
+                });
+                
+                resultTable.classList.remove('d-none');
             }
 
             // CSV Download functionality
@@ -904,10 +1080,58 @@ def upload_page():
                         window.URL.revokeObjectURL(url);
                         document.body.removeChild(a);
                     } else {
-                        showError('Failed to download CSV');
+                        showError('CSVダウンロードに失敗しました');
                     }
                 } catch (error) {
-                    showError('Error downloading CSV: ' + error.message);
+                    showError('CSVダウンロードエラー: ' + error.message);
+                }
+            });
+            
+            // Export CSV functionality
+            exportCsvBtn.addEventListener('click', async () => {
+                try {
+                    const response = await fetch('/export/csv');
+                    if (response.ok) {
+                        const blob = await response.blob();
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.style.display = 'none';
+                        a.href = url;
+                        const filename = response.headers.get('Content-Disposition')?.match(/filename="(.+)"/)?.[1] || 'results.csv';
+                        a.download = filename;
+                        document.body.appendChild(a);
+                        a.click();
+                        window.URL.revokeObjectURL(url);
+                        document.body.removeChild(a);
+                    } else {
+                        showError('CSVエクスポートに失敗しました');
+                    }
+                } catch (error) {
+                    showError('CSVエクスポートエラー: ' + error.message);
+                }
+            });
+            
+            // Export JSON functionality
+            exportJsonBtn.addEventListener('click', async () => {
+                try {
+                    const response = await fetch('/export/json');
+                    if (response.ok) {
+                        const blob = await response.blob();
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.style.display = 'none';
+                        a.href = url;
+                        const filename = response.headers.get('Content-Disposition')?.match(/filename="(.+)"/)?.[1] || 'results.json';
+                        a.download = filename;
+                        document.body.appendChild(a);
+                        a.click();
+                        window.URL.revokeObjectURL(url);
+                        document.body.removeChild(a);
+                    } else {
+                        showError('JSONエクスポートに失敗しました');
+                    }
+                } catch (error) {
+                    showError('JSONエクスポートエラー: ' + error.message);
                 }
             });
 
@@ -927,15 +1151,22 @@ def upload_page():
 @app.route("/api/upload", methods=['POST'])
 def upload_files():
     """Process uploaded PDF files"""
+    global current_results
     
     if 'files' not in request.files:
-        return jsonify({"error": "No files uploaded"}), 400
+        return jsonify({"error": "ファイルがアップロードされていません"}), 400
     
     files = request.files.getlist('files')
     
     if not files or files[0].filename == '':
-        return jsonify({"error": "No files selected"}), 400
+        return jsonify({"error": "ファイルが選択されていません"}), 400
     
+    # Validate file count (max 10 files)
+    if len(files) > 10:
+        return jsonify({"error": "一度に処理できるファイルは最大10個までです"}), 400
+    
+    # Clear previous results for new upload
+    current_results = []
     results = []
     errors = []
     
@@ -943,7 +1174,7 @@ def upload_files():
         try:
             # Validate file type
             if not allowed_file(file.filename):
-                errors.append(f"File {file.filename}: Invalid file type. Only PDF files are allowed.")
+                errors.append(f"ファイル {file.filename}: PDFファイルのみ対応しています。")
                 continue
             
             # Read file content
@@ -951,7 +1182,7 @@ def upload_files():
             
             # Validate file size
             if len(content) > MAX_FILE_SIZE:
-                errors.append(f"File {file.filename}: File size exceeds 3MB limit.")
+                errors.append(f"ファイル {file.filename}: ファイルサイズが上限（3MB）を超えています。")
                 continue
             
             # Extract text from PDF
@@ -978,25 +1209,23 @@ def upload_files():
                 result["sheet_status"] = "not_connected"
             
             results.append(result)
+            # Store in current_results for export
+            current_results.append(result)
             
         except Exception as e:
             logger.error(f"Error processing file {file.filename}: {e}")
             errors.append(f"File {file.filename}: Processing failed - {str(e)}")
     
     if errors and not results:
-        return jsonify({"error": "Processing failed", "errors": errors}), 422
+        return jsonify({"error": "処理に失敗しました", "errors": errors}), 422
     
-    # For single file upload, return the result directly
-    if len(results) == 1:
-        result = results[0]
-        if errors:
-            result["errors"] = errors
-        return jsonify(result)
-    
-    # For multiple files, return as before
+    # Always return results array for consistency
     response = {
         "ok": True,
-        "results": results
+        "results": results,
+        "total_files": len(files),
+        "processed_files": len(results),
+        "failed_files": len(errors)
     }
     
     if errors:
