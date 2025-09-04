@@ -1,2 +1,2 @@
-# Import the FastAPI app from app.py
+# Import the Flask app from app.py
 from app import app

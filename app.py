@@ -7,27 +7,10 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 import time
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form, status
-from fastapi.responses import HTMLResponse, JSONResponse, Response as FastAPIResponse, RedirectResponse
+from flask import Flask, request, jsonify, render_template_string, Response
 from werkzeug.utils import secure_filename
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional
+from flask_cors import CORS
 
-# Pydantic models for request data
-class SettingsData(BaseModel):
-    service_account_json: str
-    sheet_id: str
-    sheet_name: Optional[str] = "invoices"
-
-class CSVDownloadData(BaseModel):
-    file: str
-    vendor: str
-    date: str
-    amount: float
-    confidence: float
-    needs_review: str
-    raw_excerpt: str
 import PyPDF2
 import io
 
@@ -37,49 +20,6 @@ from googleapiclient.errors import HttpError
 import gspread
 import csv
 from io import StringIO
-
-# Import i18n translations
-from data.i18n import i18n
-
-# Language detection and translation helpers
-def get_lang(request: Request) -> str:
-    """Get language from query params, cookies, or Accept-Language header"""
-    # Check query parameter first
-    if "lang" in request.query_params:
-        lang = request.query_params["lang"]
-        if lang in ["ja", "en"]:
-            return lang
-    
-    # Check cookie
-    if "lang" in request.cookies:
-        lang = request.cookies["lang"]
-        if lang in ["ja", "en"]:
-            return lang
-    
-    # Check Accept-Language header
-    accept_lang = request.headers.get("accept-language", "")
-    if "ja" in accept_lang.lower():
-        return "ja"
-    
-    # Default to Japanese
-    return "ja"
-
-def t(key: str, lang: str) -> str:
-    """Translate a key for the given language"""
-    return i18n.get(lang, {}).get(key, key)
-
-# FastAPI helper functions to replace Flask ones
-def jsonify(data: dict) -> JSONResponse:
-    """FastAPI equivalent of Flask's jsonify"""
-    return JSONResponse(content=data)
-
-def redirect(url: str, status_code: int = 302) -> RedirectResponse:
-    """FastAPI equivalent of Flask's redirect"""
-    return RedirectResponse(url=url, status_code=status_code)
-
-def make_response(content: str, status_code: int = 200) -> FastAPIResponse:
-    """FastAPI equivalent of Flask's make_response"""
-    return FastAPIResponse(content=content, status_code=status_code, media_type="text/html")
 
 # Japanese invoice extraction rule pack
 import re, unicodedata
@@ -157,7 +97,7 @@ def get_worksheet():
             worksheet = sheet.worksheet(worksheet_name)
         except gspread.WorksheetNotFound:
             # Create worksheet if it doesn't exist
-            worksheet = sheet.add_worksheet(title=worksheet_name, rows=1000, cols=20)
+            worksheet = sheet.add_worksheet(title=worksheet_name, rows="1000", cols="20")
             # Add headers
             headers = ['timestamp', 'file', 'vendor', 'date', 'amount', 'currency', 'category', 'description', 'notes', 'confidence', 'needs_review', 'raw_excerpt', 'source']
             worksheet.append_row(headers)
@@ -200,17 +140,12 @@ def save_row_to_sheet(payload):
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
-app = FastAPI(title="InvoiceAgent Lite", description="PDF invoice processing with Google Sheets integration")
+# Initialize Flask app
+app = Flask(__name__)
+app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key")
 
 # Add CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+CORS(app, origins=["*"])
 
 # Configuration from environment variables
 SHEET_ID = os.getenv("SHEET_ID", "")
@@ -276,7 +211,7 @@ class InvoiceProcessor:
                 text += page.extract_text() + "\n"
             
             return text
-        except PyPDF2.PdfReadError as e:
+        except PyPDF2.errors.PdfReadError as e:
             logger.error(f"PDF read error: {e}")
             raise Exception("Invalid PDF file format or password-protected")
         except Exception as e:
@@ -431,16 +366,17 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-@app.get("/healthz")
+@app.route("/healthz", methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    return {"ok": True}
+    return jsonify({"ok": True})
 
-@app.get("/selfcheck")
-def self_check(request: Request, pw: str = ""):
+@app.route("/selfcheck", methods=['GET'])
+def self_check():
     """Self check endpoint with authentication"""
+    pw = request.args.get('pw', '')
     if pw != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password")
+        return jsonify({"error": "Invalid password"}), 401
     
     try:
         # Create test data
@@ -457,52 +393,30 @@ def self_check(request: Request, pw: str = ""):
         # Append to sheet
         success = processor.append_to_sheet(test_data)
         
-        return {
+        return jsonify({
             "ok": True,
             "message": "Self-check completed",
             "sheet_updated": success,
             "test_data": test_data
-        }
+        })
         
     except Exception as e:
         logger.error(f"Self-check failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Self-check failed: {str(e)}")
+        return jsonify({"error": f"Self-check failed: {str(e)}"}), 500
 
-@app.get("/settings")
-def settings_page(request: Request):
+@app.route("/settings", methods=['GET'])
+def settings_page():
     """Serve the settings page"""
-    lang = get_lang(request)
-    
-    def translate(key):
-        return t(key, lang)
-    
-    # Language switcher HTML
-    current_path = str(request.url.path)
-    if lang == 'ja':
-        jp_link = f'<span class="text-muted">{translate("lang_jp")}</span>'
-        en_link = f'<a href="/lang?lang=en&next={current_path}" class="text-decoration-none">{translate("lang_en")}</a>'
-    else:
-        jp_link = f'<a href="/lang?lang=ja&next={current_path}" class="text-decoration-none">{translate("lang_jp")}</a>'
-        en_link = f'<span class="text-muted">{translate("lang_en")}</span>'
-    
-    lang_switcher = f"""
-    <nav class="d-flex gap-2 align-items-center">
-        {jp_link}
-        <span>|</span>
-        {en_link}
-    </nav>
-    """
-    
     config = load_config()
     connected = bool(config.get('service_account_json') and config.get('sheet_id'))
     
-    html_content = '''
+    html_content = f"""
     <!DOCTYPE html>
-    <html lang="''' + lang + '''" data-bs-theme="dark">
+    <html lang="en" data-bs-theme="dark">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>''' + translate("title") + ''' - ''' + translate("settings") + '''</title>
+        <title>InvoiceAgent Lite - Settings</title>
         <link href="https://cdn.replit.com/agent/bootstrap-agent-dark-theme.min.css" rel="stylesheet">
     </head>
     <body>
@@ -510,28 +424,22 @@ def settings_page(request: Request):
             <div class="row justify-content-center">
                 <div class="col-lg-8">
                     <div class="card">
-                        <div class="card-header d-flex justify-content-between align-items-center">
-                            <div>
-                                <h1 class="card-title mb-0">''' + translate("settings_title") + '''</h1>
-                                <p class="card-text mb-0">''' + translate("settings_desc") + '''</p>
-                            </div>
-                            <div class="d-flex gap-2 align-items-center">
-                                ''' + lang_switcher + '''
-                                <a href="/upload" class="btn btn-outline-secondary btn-sm">''' + translate("back_to_upload") + '''</a>
-                            </div>
+                        <div class="card-header">
+                            <h1 class="card-title mb-0">Google Sheets Connection</h1>
+                            <p class="card-text mb-0">Configure your Google Sheets integration</p>
                         </div>
                         <div class="card-body">
-                            <div class="alert ''' + ('alert-success' if connected else 'alert-warning') + ''' mb-4">
-                                <strong>''' + translate("status_label") + '''</strong> ''' + (translate("status_connected") if connected else translate("status_not_connected")) + '''
-                                ''' + (f'<br><small>Sheet ID: {config.get("sheet_id", "")[:20]}...</small>' if connected else '') + '''
+                            <div class="alert {'alert-success' if connected else 'alert-warning'} mb-4">
+                                <strong>Status:</strong> {'Connected' if connected else 'Not Connected'}
+                                {f'<br><small>Sheet ID: {config.get("sheet_id", "")[:20]}...</small>' if connected else ''}
                             </div>
                             
                             <form id="settingsForm">
                                 <div class="mb-3">
-                                    <label for="serviceAccountJson" class="form-label">''' + translate("service_json") + '''</label>
+                                    <label for="serviceAccountJson" class="form-label">Service Account JSON</label>
                                     <textarea class="form-control" id="serviceAccountJson" rows="8" 
-                                              placeholder="''' + translate("service_json_ph") + '''">''' + ('***hidden***' if config.get('service_account_json') else '') + '''</textarea>
-                                    <div class="form-text">''' + translate("gcloud_help") + '''</div>
+                                              placeholder="Paste your Google Service Account JSON credentials here...">{'***hidden***' if config.get('service_account_json') else ''}</textarea>
+                                    <div class="form-text">Download from Google Cloud Console → IAM & Admin → Service Accounts</div>
                                 </div>
                                 
                                 <div class="mb-3">
@@ -641,39 +549,40 @@ def settings_page(request: Request):
     """
     return html_content
 
-@app.post("/settings")
-def save_settings(data: SettingsData):
+@app.route("/settings", methods=['POST'])
+def save_settings():
     """Save settings and test connection"""
     try:
+        data = request.get_json()
         
-        if not data.service_account_json or not data.sheet_id:
+        if not data.get('service_account_json') or not data.get('sheet_id'):
             return jsonify({"error": "Service Account JSON and Sheet ID are required"}), 400
         
         # Validate JSON format
         try:
-            json.loads(data.service_account_json)
+            json.loads(data['service_account_json'])
         except json.JSONDecodeError:
             return jsonify({"error": "Invalid JSON format in Service Account"}), 400
         
         # Save to config file
         os.makedirs('data', exist_ok=True)
         with open('data/config.json', 'w') as f:
-            json.dump(data.dict(), f, indent=2)
+            json.dump(data, f, indent=2)
         
         # Test connection
         try:
             creds = service_account.Credentials.from_service_account_info(
-                json.loads(data.service_account_json),
+                json.loads(data['service_account_json']),
                 scopes=['https://www.googleapis.com/auth/spreadsheets']
             )
             gc = gspread.authorize(creds)
-            sheet = gc.open_by_key(data.sheet_id)
-            worksheet_name = data.sheet_name
+            sheet = gc.open_by_key(data['sheet_id'])
+            worksheet_name = data.get('sheet_name', 'invoices')
             
             try:
                 worksheet = sheet.worksheet(worksheet_name)
             except gspread.WorksheetNotFound:
-                worksheet = sheet.add_worksheet(title=worksheet_name, rows=1000, cols=20)
+                worksheet = sheet.add_worksheet(title=worksheet_name, rows="1000", cols="20")
                 headers = ['timestamp', 'file', 'vendor', 'date', 'amount', 'currency', 'category', 'description', 'notes', 'confidence', 'needs_review', 'raw_excerpt', 'source']
                 worksheet.append_row(headers)
             
@@ -698,10 +607,11 @@ def save_settings(data: SettingsData):
         logger.error(f"Settings save error: {e}")
         return jsonify({"error": f"Failed to save settings: {str(e)}"}), 500
 
-@app.post("/download_csv")
-def download_csv(data: CSVDownloadData):
+@app.route("/download_csv", methods=['POST'])
+def download_csv():
     """Generate CSV download for a single result"""
     try:
+        data = request.get_json()
         
         # Create CSV content with 13 columns
         output = StringIO()
@@ -745,7 +655,7 @@ def download_csv(data: CSVDownloadData):
         logger.error(f"CSV download error: {e}")
         return jsonify({"error": f"Failed to generate CSV: {str(e)}"}), 500
 
-@app.get("/upload", response_class=HTMLResponse)
+@app.route("/upload", methods=['GET'])
 def upload_page():
     """Serve the upload page"""
     html_content = """
@@ -754,7 +664,7 @@ def upload_page():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>InvoiceAgent Lite</title>
+        <title>InvoiceAgent Lite - PDF Upload</title>
         <link href="https://cdn.replit.com/agent/bootstrap-agent-dark-theme.min.css" rel="stylesheet">
         <style>
             .drop-zone {
@@ -786,13 +696,10 @@ def upload_page():
                     <div class="card">
                         <div class="card-header d-flex justify-content-between align-items-center">
                             <div>
-                                <h1 class="card-title mb-0">''' + translate("title") + '''</h1>
+                                <h1 class="card-title mb-0">InvoiceAgent Lite</h1>
                                 <p class="card-text mb-0">Upload PDF invoices to extract financial data</p>
                             </div>
-                            <div class="d-flex gap-2 align-items-center">
-                                ''' + lang_switcher + '''
-                                <a href="/settings" class="btn btn-outline-secondary btn-sm">⚙️ ''' + translate("settings") + '''</a>
-                            </div>
+                            <a href="/settings" class="btn btn-outline-secondary btn-sm">⚙️ Settings</a>
                         </div>
                         <div class="card-body">
                             <form id="uploadForm">
@@ -801,12 +708,12 @@ def upload_page():
                                         <svg width="48" height="48" fill="currentColor" class="mb-3">
                                             <use href="#upload-icon"/>
                                         </svg>
-                                        <h5>''' + translate("drop_headline") + '''</h5>
-                                        <p class="text-muted">''' + translate("subnote") + '''</p>
+                                        <h5>Drop PDF files here or click to browse</h5>
+                                        <p class="text-muted">Maximum 3MB per file, PDF format only</p>
                                     </div>
                                     <input type="file" id="fileInput" multiple accept="application/pdf" class="d-none">
                                     <button type="button" class="btn btn-outline-primary" onclick="document.getElementById('fileInput').click()">
-                                        ''' + translate("browse_btn") + '''
+                                        Browse Files
                                     </button>
                                 </div>
                                 
@@ -815,16 +722,16 @@ def upload_page():
                                 <div class="d-grid gap-2">
                                     <button type="submit" class="btn btn-primary" id="uploadBtn" disabled>
                                         <span class="spinner-border spinner-border-sm me-2 d-none" id="uploadSpinner"></span>
-                                        ''' + translate("upload_btn") + '''
+                                        Upload and Process
                                     </button>
                                 </div>
                             </form>
                             
                             <div id="resultContainer" class="mt-4 d-none">
                                 <div class="d-flex justify-content-between align-items-center mb-2">
-                                    <h5>''' + translate("results_section") + '''</h5>
+                                    <h5>Processing Results</h5>
                                     <button type="button" class="btn btn-outline-primary btn-sm d-none" id="downloadCsvBtn">
-                                        📥 ''' + translate("csv_dl") + '''
+                                        📥 Download CSV
                                     </button>
                                 </div>
                                 <pre id="resultOutput" class="result-container bg-body-secondary p-3 rounded"></pre>
@@ -1014,15 +921,17 @@ def upload_page():
         </script>
     </body>
     </html>
-    '''
+    """
     return html_content
 
-@app.post("/api/upload")
-def upload_files(files: List[UploadFile] = File(...)):
+@app.route("/api/upload", methods=['POST'])
+def upload_files():
     """Process uploaded PDF files"""
     
-    if not files:
+    if 'files' not in request.files:
         return jsonify({"error": "No files uploaded"}), 400
+    
+    files = request.files.getlist('files')
     
     if not files or files[0].filename == '':
         return jsonify({"error": "No files selected"}), 400
@@ -1038,7 +947,7 @@ def upload_files(files: List[UploadFile] = File(...)):
                 continue
             
             # Read file content
-            content = file.file.read()
+            content = file.read()
             
             # Validate file size
             if len(content) > MAX_FILE_SIZE:
@@ -1095,23 +1004,6 @@ def upload_files(files: List[UploadFile] = File(...)):
     
     return jsonify(response)
 
-@app.get("/")
-def index(request: Request):
-    return redirect('/upload')
-
-@app.get("/lang")
-def set_lang(request: Request):
-    """Set language cookie and redirect"""
-    lang = request.query_params.get('lang', 'ja')
-    next_url = request.query_params.get('next', '/upload')
-    
-    # Validate language
-    if lang not in ['ja', 'en']:
-        lang = 'ja'
-    
-    resp = make_response(redirect(next_url))
-    resp.set_cookie('lang', lang, max_age=15552000)  # 180 days
-    return resp
-
-# FastAPI apps are run via ASGI servers like uvicorn, not via app.run()
-# Use: uvicorn main:app --host 0.0.0.0 --port 5000
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
