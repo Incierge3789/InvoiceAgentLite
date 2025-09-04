@@ -746,13 +746,14 @@ def upload_page():
                         </div>
                         
                         <!-- Error display container -->
-                        <div id="errorBox" class="alert alert-danger alert-dismissible m-3 d-none" role="alert">
-                            <button type="button" class="btn-close" aria-label="Close" onclick="document.getElementById('errorBox').style.display='none'"></button>
+                        <div id="errorContainer" class="alert alert-danger alert-dismissible m-3 d-none" role="alert">
+                            <div id="errorList"></div>
+                            <button type="button" class="btn-close" aria-label="Close" onclick="document.getElementById('errorContainer').classList.add('d-none')"></button>
                         </div>
                         
                         <div class="card-body">
                             <form id="uploadForm">
-                                <div class="drop-zone mb-3" id="dropzone">
+                                <div class="drop-zone mb-3" id="dropZone">
                                     <div class="mb-3">
                                         <svg width="48" height="48" fill="currentColor" class="mb-3">
                                             <use href="#upload-icon"/>
@@ -760,8 +761,8 @@ def upload_page():
                                         <h5>ここにPDFをドラッグ＆ドロップ、またはクリックして選択</h5>
                                         <p class="text-muted">PDFのみ、最大10ファイル（各3MB）</p>
                                     </div>
-                                    <input id="fileInput" name="files" type="file" multiple accept=".pdf,application/pdf" hidden>
-                                    <button type="button" class="btn btn-outline-primary" id="pickBtn">
+                                    <input id="fileInput" name="files" type="file" accept="application/pdf" multiple class="d-none">
+                                    <button type="button" class="btn btn-outline-primary" id="browseAnchor">
                                         📄 ファイルを選択（複数可）
                                     </button>
                                 </div>
@@ -785,13 +786,13 @@ def upload_page():
                                 <div class="d-flex justify-content-between align-items-center mb-3">
                                     <h5>解析結果</h5>
                                     <div>
-                                        <button type="button" class="btn btn-outline-primary btn-sm me-2" id="saveCsvBtn">
+                                        <button type="button" class="btn btn-outline-primary btn-sm me-2" id="btnSaveCsv">
                                             結果をCSVで保存
                                         </button>
-                                        <button type="button" class="btn btn-outline-secondary btn-sm me-2" id="saveJsonBtn">
+                                        <button type="button" class="btn btn-outline-secondary btn-sm me-2" id="btnSaveJson">
                                             結果をJSONで保存
                                         </button>
-                                        <button type="button" class="btn btn-outline-danger btn-sm" id="clearBtn">
+                                        <button type="button" class="btn btn-outline-danger btn-sm" id="btnClear">
                                             結果をクリア
                                         </button>
                                     </div>
@@ -818,6 +819,9 @@ def upload_page():
                                 <pre id="resultOutput" class="result-container bg-body-secondary p-3 rounded"></pre>
                             </div>
                             
+                            <div id="errorContainer" class="mt-4 d-none">
+                                <div class="alert alert-danger" id="errorMessage"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -834,7 +838,244 @@ def upload_page():
             </defs>
         </svg>
 
-        <script src="{{ url_for('static', filename='upload.js') }}" defer></script>
+        <script>
+            // Validation constants (mirror backend)
+            const MAX_FILES = 10;
+            const MAX_SIZE = 3 * 1024 * 1024; // 3MB
+            const ALLOWED_EXT = ['.pdf'];
+            const ALLOWED_MIME = ['application/pdf'];
+            
+            // Error messages (fixed Japanese text)
+            const ERROR_MESSAGES = {
+                INVALID_TYPE: 'PDFファイルのみ対応しています。',
+                TOO_LARGE: 'ファイルサイズが上限（3MB）を超えています。',
+                TOO_MANY: '一度に選択できるのは最大10ファイルです。',
+                NO_FILE: 'ファイルが選択されていません。'
+            };
+
+            const dropZone = document.getElementById('dropZone');
+            const fileInput = document.getElementById('fileInput');
+            const listBox = document.getElementById('selectedList');
+            const countBox = document.getElementById('selectedCount');
+            const uploadBtn = document.getElementById('uploadBtn');
+            const uploadSpinner = document.getElementById('uploadSpinner');
+            const resultContainer = document.getElementById('resultContainer');
+            const resultOutput = document.getElementById('resultOutput');
+            const errorContainer = document.getElementById('errorContainer');
+            const errorList = document.getElementById('errorList');
+            const btnSaveCsv = document.getElementById('btnSaveCsv');
+            const btnSaveJson = document.getElementById('btnSaveJson');
+            const btnClear = document.getElementById('btnClear');
+            const resultsBody = document.getElementById('resultsBody');
+            
+            let selectedFiles = [];
+            let validationErrors = [];
+
+            // Drag and drop functionality
+            dropZone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                dropZone.classList.add('dragover');
+            });
+            
+            dropZone.addEventListener('dragleave', () => {
+                dropZone.classList.remove('dragover');
+            });
+            
+            dropZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                dropZone.classList.remove('dragover');
+                validateAndAddFiles(e.dataTransfer.files);
+            });
+            
+            const browseAnchor = document.getElementById('browseAnchor');
+            if (browseAnchor) {
+                browseAnchor.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    fileInput?.click();
+                });
+            }
+            
+            fileInput.addEventListener('change', (e) => {
+                validateAndAddFiles(e.target.files);
+                e.target.value = '';
+            });
+
+
+            function updateButtonState() {
+                uploadBtn.disabled = (selectedFiles.length === 0);
+                uploadBtn.classList.toggle('disabled', selectedFiles.length === 0);
+            }
+            
+            function renderSelected() {
+                if (countBox) countBox.textContent = `${selectedFiles.length}ファイル選択`;
+                if (listBox) {
+                    listBox.innerHTML = selectedFiles.map(f => 
+                        `<div class="small text-muted">${f.name} (${(f.size/1024/1024).toFixed(2)}MB)</div>`
+                    ).join('');
+                }
+            }
+            
+            function showErrors() {
+                if (validationErrors.length > 0) {
+                    const errorHtml = validationErrors.map(error => `<div>${error}</div>`).join('');
+                    errorList.innerHTML = errorHtml;
+                    errorContainer.classList.remove('d-none');
+                } else {
+                    errorContainer.classList.add('d-none');
+                }
+            }
+            
+            function validateAndAddFiles(newFiles) {
+                validationErrors = []; // Reset errors
+                const currentCount = selectedFiles.length;
+                const newFilesArray = Array.from(newFiles);
+                
+                // Check total file count
+                if (currentCount + newFilesArray.length > MAX_FILES) {
+                    const excessCount = (currentCount + newFilesArray.length) - MAX_FILES;
+                    validationErrors.push(ERROR_MESSAGES.TOO_MANY);
+                    // Keep only first MAX_FILES - currentCount files
+                    newFilesArray.splice(MAX_FILES - currentCount);
+                }
+                
+                // Validate each file
+                const validFiles = [];
+                for (const file of newFilesArray) {
+                    let isValid = true;
+                    
+                    // Check file type (MIME and extension)
+                    const isValidMime = ALLOWED_MIME.includes(file.type);
+                    const isValidExt = ALLOWED_EXT.some(ext => file.name.toLowerCase().endsWith(ext));
+                    
+                    if (!isValidMime && !isValidExt) {
+                        validationErrors.push(`${file.name}: ${ERROR_MESSAGES.INVALID_TYPE}`);
+                        isValid = false;
+                    }
+                    
+                    // Check file size
+                    if (file.size > MAX_SIZE) {
+                        validationErrors.push(`${file.name}: ${ERROR_MESSAGES.TOO_LARGE}`);
+                        isValid = false;
+                    }
+                    
+                    if (isValid) {
+                        validFiles.push(file);
+                    }
+                }
+                
+                // Add valid files to selection
+                selectedFiles = selectedFiles.concat(validFiles);
+                
+                // Update UI
+                renderSelected();
+                updateButtonState();
+                showErrors();
+            }
+
+            uploadBtn.addEventListener('click', async () => {
+                if (selectedFiles.length === 0) return;
+                
+                uploadBtn.disabled = true;
+                uploadSpinner.classList.remove('d-none');
+                
+                try {
+                    const fd = new FormData();
+                    selectedFiles.forEach(f => fd.append('files', f, f.name));
+                    
+                    const response = await fetch('/api/upload', { 
+                        method: 'POST', 
+                        body: fd 
+                    });
+                    
+                    const json = await response.json();
+                    
+                    if (json.ok) {
+                        if (json.results && json.results.length > 0) {
+                            appendRows(json.results);
+                            resultContainer.classList.remove('d-none');
+                        }
+                        if (json.errors && json.errors.length > 0) {
+                            const serverErrors = json.errors.map(err => err.message || err).join('\n');
+                            errorList.innerHTML = `<div>サーバーエラー: ${serverErrors}</div>`;
+                            errorContainer.classList.remove('d-none');
+                        }
+                        if (resultOutput) {
+                            resultOutput.textContent = JSON.stringify(json, null, 2);
+                        }
+                    } else {
+                        const errorMsg = json.error || '不明なエラー';
+                        if (json.errors && json.errors.length > 0) {
+                            const serverErrors = json.errors.map(err => err.message || err);
+                            errorList.innerHTML = serverErrors.map(err => `<div>${err}</div>`).join('');
+                        } else {
+                            errorList.innerHTML = `<div>${errorMsg}</div>`;
+                        }
+                        errorContainer.classList.remove('d-none');
+                    }
+                } catch (error) {
+                    showError('アップロードエラー: ' + error.message);
+                } finally {
+                    uploadBtn.disabled = false;
+                    uploadSpinner.classList.add('d-none');
+                }
+            });
+
+            function appendRows(rows) {
+                rows.forEach(row => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td>${row.file || '不明'}</td>
+                        <td>${row.date || '不明'}</td>
+                        <td>${row.amount ? row.amount + '円' : '不明'}</td>
+                        <td>${row.vendor || '不明'}</td>
+                        <td>
+                            <span class="badge ${row.confidence >= 0.8 ? 'bg-success' : row.confidence >= 0.5 ? 'bg-warning' : 'bg-danger'}">
+                                ${row.confidence || '不明'}
+                            </span>
+                        </td>
+                        <td>
+                            <span class="badge ${row.needs_review === 'TRUE' ? 'bg-warning' : 'bg-success'}">
+                                ${row.needs_review === 'TRUE' ? 'はい' : 'いいえ'}
+                            </span>
+                        </td>
+                    `;
+                    resultsBody.appendChild(tr);
+                });
+            }
+
+            // Export buttons
+            btnSaveCsv.addEventListener('click', () => {
+                window.location.href = '/export/csv';
+            });
+            
+            btnSaveJson.addEventListener('click', () => {
+                window.location.href = '/export/json';
+            });
+            
+            btnClear.addEventListener('click', async () => {
+                try {
+                    await fetch('/api/clear', { method: 'POST' });
+                    selectedFiles = [];
+                    validationErrors = [];
+                    document.getElementById('fileInput').value = '';
+                    resultsBody.innerHTML = '';
+                    renderSelected();
+                    updateButtonState();
+                    errorContainer.classList.add('d-none');
+                    resultContainer.classList.add('d-none');
+                } catch (error) {
+                    console.error('Clear error:', error);
+                }
+            });
+
+            function showError(message) {
+                errorList.innerHTML = `<div>${message}</div>`;
+                errorContainer.classList.remove('d-none');
+            }
+            
+            // Initialize button state
+            updateButtonState();
+        </script>
     </body>
     </html>
     """
