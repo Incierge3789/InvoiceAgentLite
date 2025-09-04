@@ -748,7 +748,7 @@ def upload_page():
                                         <h5>ここにPDFをドラッグ＆ドロップ、またはクリックして選択</h5>
                                         <p class="text-muted">PDFのみ、最大10ファイル（各3MB）</p>
                                     </div>
-                                    <input type="file" id="fileInput" multiple accept="application/pdf" class="d-none">
+                                    <input id="fileInput" name="files" type="file" accept="application/pdf" multiple class="d-none">
                                     <button type="button" class="btn btn-outline-primary" onclick="document.getElementById('fileInput').click()">
                                         📄 ファイルを選択（複数可）
                                     </button>
@@ -855,7 +855,9 @@ def upload_page():
             dropZone.addEventListener('drop', (e) => {
                 e.preventDefault();
                 dropZone.classList.remove('dragover');
-                handleFiles(e.dataTransfer.files);
+                const dropped = Array.from(e.dataTransfer.files);
+                selectedFiles = selectedFiles.concat(dropped.filter(f => f.type === 'application/pdf' || f.name.endsWith('.pdf')));
+                updateSelectedCount();
             });
             
             dropZone.addEventListener('click', () => {
@@ -863,32 +865,13 @@ def upload_page():
             });
             
             fileInput.addEventListener('change', (e) => {
-                handleFiles(e.target.files);
+                const picked = Array.from(e.target.files);
+                selectedFiles = selectedFiles.concat(picked);
+                updateSelectedCount();
             });
 
-            function handleFiles(files) {
-                if (files.length > 10) {
-                    showError('一度に処理できるファイルは最大10個までです。');
-                    return;
-                }
-                
-                selectedFiles = Array.from(files).filter(file => {
-                    if (file.type !== 'application/pdf') {
-                        showError(`ファイル ${file.name} - PDFファイルのみ対応しています。`);
-                        return false;
-                    }
-                    if (file.size > 3 * 1024 * 1024) {
-                        showError(`ファイル ${file.name} - ファイルサイズが上限（3MB）を超えています。`);
-                        return false;
-                    }
-                    return true;
-                });
-                
-                updateFileList();
-                btnUpload.disabled = selectedFiles.length === 0;
-            }
 
-            function updateFileList() {
+            function updateSelectedCount() {
                 if (selectedFiles.length === 0) {
                     fileList.innerHTML = '';
                     return;
@@ -916,9 +899,7 @@ def upload_page():
                 
                 try {
                     const fd = new FormData();
-                    for (const f of selectedFiles) { 
-                        fd.append('files', f); 
-                    }
+                    selectedFiles.forEach(f => fd.append('files', f, f.name));
                     
                     const response = await fetch('/api/upload', { 
                         method: 'POST', 
@@ -977,10 +958,10 @@ def upload_page():
             btnClear.addEventListener('click', async () => {
                 try {
                     await fetch('/api/clear', { method: 'POST' });
-                    resultsBody.innerHTML = '';
-                    fileInput.value = '';
                     selectedFiles = [];
-                    updateFileList();
+                    document.getElementById('fileInput').value = '';
+                    resultsBody.innerHTML = '';
+                    updateSelectedCount();
                     btnUpload.disabled = true;
                     resultContainer.classList.add('d-none');
                 } catch (error) {

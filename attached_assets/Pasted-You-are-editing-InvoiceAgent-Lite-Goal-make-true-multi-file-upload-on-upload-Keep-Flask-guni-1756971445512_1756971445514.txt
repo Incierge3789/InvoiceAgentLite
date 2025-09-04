@@ -1,0 +1,57 @@
+You are editing “InvoiceAgent Lite”.
+Goal: make true multi-file upload on /upload. Keep Flask + gunicorn. Don’t change any endpoints other than /api/upload internals. Keep Japanese UI as-is.
+
+Fix exactly these points:
+
+[HTML]
+- In templates/upload.html, ensure the input is:
+  <input id="fileInput" name="files" type="file" accept="application/pdf" multiple>
+  (name must be "files", and include the multiple attribute)
+
+[Front-end JS in upload.html]
+- Maintain an array store:
+  let selectedFiles = [];
+- When the file dialog changes:
+  const picked = Array.from(document.getElementById('fileInput').files);
+  selectedFiles = selectedFiles.concat(picked);
+  updateSelectedCount(); // show “Nファイル選択”
+- For drag & drop:
+  preventDefault on dragover and drop.
+  const dropped = Array.from(e.dataTransfer.files);
+  selectedFiles = selectedFiles.concat(dropped.filter(f => f.type==='application/pdf' || f.name.endsWith('.pdf')));
+  updateSelectedCount();
+- When clicking “アップロードして解析”:
+  const fd = new FormData();
+  selectedFiles.forEach(f => fd.append('files', f, f.name));  // APPEND, not set
+  fetch('/api/upload', { method: 'POST', body: fd })
+    .then(r => r.json())
+    .then(renderTable);
+- “クリア”:
+  selectedFiles = [];
+  document.getElementById('fileInput').value = '';
+  clearResultsAndDisableExports();
+
+[Back-end app.py]
+- Keep Flask. In /api/upload:
+  - files = request.files.getlist('files')    # getlist
+  - if not files: return 400
+  - if len(files) > 10: return 400
+  - For each file:
+      * validate PDF by mimetype or extension
+      * enforce <= 3MB (len(file.read()) <= 3*1024*1024); use bytes then process
+      * call the existing extraction helper to get: amount, date, vendor, confidence, needs_review, raw_excerpt
+      * append an object to results array with keys:
+        file, date, amount, vendor, confidence, needs_review, raw_excerpt
+      * if Sheets connected, save each row as today
+  - return {"ok": true, "results": results, "sheet_status": existing_status}
+
+[Exports]
+- CSV/JSON export buttons must export ALL rows currently in the table (results array), not just the last one.
+- Disable export buttons when results.length === 0.
+
+Acceptance:
+- /upload shows “ファイルを選択（複数可）”.
+- 選択ダイアログで3つ選ぶ→“3ファイル選択”と出る。
+- 解析→表に3行出る。JSONダウンロードは3オブジェクト、CSVはヘッダー+3行。
+- クリアで選択/表/エクスポートを初期化。
+Do not touch framework or deployment configs.
