@@ -754,10 +754,11 @@ def upload_page():
                                     </button>
                                 </div>
                                 
-                                <div id="fileList" class="file-list mb-3"></div>
+                                <div id="selectedCount" class="badge bg-info mb-2 d-none"></div>
+                                <div id="selectedList" class="file-list mb-3"></div>
                                 
                                 <div class="d-grid gap-2">
-                                    <button type="button" class="btn btn-primary" id="btnUpload" disabled>
+                                    <button id="uploadBtn" type="button" class="btn btn-primary w-100" disabled>
                                         <span class="spinner-border spinner-border-sm me-2 d-none" id="uploadSpinner"></span>
                                         アップロードして解析
                                     </button>
@@ -825,157 +826,151 @@ def upload_page():
         </svg>
 
         <script>
-            const dropZone = document.getElementById('dropZone');
-            const fileInput = document.getElementById('fileInput');
-            const fileList = document.getElementById('fileList');
-            const btnUpload = document.getElementById('btnUpload');
-            const uploadSpinner = document.getElementById('uploadSpinner');
-            const resultContainer = document.getElementById('resultContainer');
-            const resultOutput = document.getElementById('resultOutput');
-            const errorContainer = document.getElementById('errorContainer');
-            const errorMessage = document.getElementById('errorMessage');
-            const btnSaveCsv = document.getElementById('btnSaveCsv');
-            const btnSaveJson = document.getElementById('btnSaveJson');
-            const btnClear = document.getElementById('btnClear');
-            const resultsBody = document.getElementById('resultsBody');
-            
-            let selectedFiles = [];
-            let lastResult = null;
+(() => {
+  const fileInput   = document.getElementById('fileInput');
+  const uploadBtn   = document.getElementById('uploadBtn');
+  const dropZone    = document.getElementById('dropZone');
+  const listBox     = document.getElementById('selectedList');
+  const countBox    = document.getElementById('selectedCount');
+  const resultsBody = document.getElementById('resultsBody');
+  const resultContainer = document.getElementById('resultContainer');
+  const errorContainer = document.getElementById('errorContainer');
+  const errorMessage = document.getElementById('errorMessage');
+  const btnSaveCsv = document.getElementById('btnSaveCsv');
+  const btnSaveJson = document.getElementById('btnSaveJson');
+  const btnClear = document.getElementById('btnClear');
 
-            // Drag and drop functionality
-            dropZone.addEventListener('dragover', (e) => {
-                e.preventDefault();
-                dropZone.classList.add('dragover');
-            });
-            
-            dropZone.addEventListener('dragleave', () => {
-                dropZone.classList.remove('dragover');
-            });
-            
-            dropZone.addEventListener('drop', (e) => {
-                e.preventDefault();
-                dropZone.classList.remove('dragover');
-                const dropped = Array.from(e.dataTransfer.files);
-                selectedFiles = selectedFiles.concat(dropped.filter(f => f.type === 'application/pdf' || f.name.endsWith('.pdf')));
-                updateSelectedCount();
-            });
-            
-            dropZone.addEventListener('click', () => {
-                fileInput.click();
-            });
-            
-            fileInput.addEventListener('change', (e) => {
-                const picked = Array.from(e.target.files);
-                selectedFiles = selectedFiles.concat(picked);
-                updateSelectedCount();
-            });
+  let selectedFiles = [];
 
+  // --- helpers ---
+  function updateButtonState() {
+    uploadBtn.disabled = (selectedFiles.length === 0);
+    uploadBtn.classList.toggle('disabled', selectedFiles.length === 0);
+  }
+  function renderSelected() {
+    if (countBox) {
+      countBox.textContent = `${selectedFiles.length}ファイル選択`;
+      countBox.classList.toggle('d-none', selectedFiles.length === 0);
+    }
+    if (listBox)  listBox.innerHTML = selectedFiles.map(f => `<div class="small text-muted">${f.name} (${(f.size/1024/1024).toFixed(2)}MB)</div>`).join('');
+  }
+  function addFiles(files) {
+    const pdfs = Array.from(files).filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
+    selectedFiles = selectedFiles.concat(pdfs);
+    renderSelected();
+    updateButtonState();
+  }
+  function clearAll() {
+    selectedFiles = [];
+    if (fileInput) fileInput.value = '';
+    renderSelected();
+    updateButtonState();
+    if (resultsBody) resultsBody.innerHTML = '';
+    if (resultContainer) resultContainer.classList.add('d-none');
+  }
+  function showError(message) {
+    if (errorMessage) errorMessage.textContent = message;
+    if (errorContainer) errorContainer.classList.remove('d-none');
+    setTimeout(() => {
+      if (errorContainer) errorContainer.classList.add('d-none');
+    }, 5000);
+  }
+  function renderTable(json) {
+    if (json.ok && json.results && resultsBody) {
+      json.results.forEach(row => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${row.file || '不明'}</td>
+          <td>${row.date || '不明'}</td>
+          <td>${row.amount ? row.amount + '円' : '不明'}</td>
+          <td>${row.vendor || '不明'}</td>
+          <td>
+            <span class="badge ${row.confidence >= 0.8 ? 'bg-success' : row.confidence >= 0.5 ? 'bg-warning' : 'bg-danger'}">
+              ${row.confidence || '不明'}
+            </span>
+          </td>
+          <td>
+            <span class="badge ${row.needs_review === 'TRUE' ? 'bg-warning' : 'bg-success'}">
+              ${row.needs_review === 'TRUE' ? 'はい' : 'いいえ'}
+            </span>
+          </td>
+        `;
+        resultsBody.appendChild(tr);
+      });
+      if (resultContainer) resultContainer.classList.remove('d-none');
+    } else {
+      showError('アップロードに失敗しました: ' + (json.error || '不明なエラー'));
+    }
+  }
 
-            function updateSelectedCount() {
-                if (selectedFiles.length === 0) {
-                    fileList.innerHTML = '';
-                    return;
-                }
-                
-                const countText = `${selectedFiles.length}ファイル選択`;
-                const listHtml = selectedFiles.map(file => 
-                    `<div class="d-flex justify-content-between align-items-center border-bottom py-2">
-                        <span>${file.name}</span>
-                        <small class="text-muted">${(file.size / 1024 / 1024).toFixed(2)} MB</small>
-                    </div>`
-                ).join('');
-                
-                fileList.innerHTML = `
-                    <div class="alert alert-info">${countText}</div>
-                    <div class="border rounded p-2">${listHtml}</div>
-                `;
-            }
+  // --- file dialog ---
+  if (fileInput) {
+    fileInput.addEventListener('change', (e) => {
+      addFiles(e.target.files);
+      e.target.value = '';
+    });
+  }
 
-            btnUpload.addEventListener('click', async () => {
-                if (selectedFiles.length === 0) return;
-                
-                btnUpload.disabled = true;
-                uploadSpinner.classList.remove('d-none');
-                
-                try {
-                    const fd = new FormData();
-                    selectedFiles.forEach(f => fd.append('files', f, f.name));
-                    
-                    const response = await fetch('/api/upload', { 
-                        method: 'POST', 
-                        body: fd 
-                    });
-                    
-                    const json = await response.json();
-                    
-                    if (json.ok) {
-                        appendRows(json.results);
-                        resultOutput.textContent = JSON.stringify(json, null, 2);
-                        resultContainer.classList.remove('d-none');
-                    } else {
-                        showError('アップロードに失敗しました: ' + (json.error || '不明なエラー'));
-                    }
-                } catch (error) {
-                    showError('アップロードエラー: ' + error.message);
-                } finally {
-                    btnUpload.disabled = false;
-                    uploadSpinner.classList.add('d-none');
-                }
-            });
+  // --- drag & drop ---
+  if (dropZone) {
+    ['dragenter','dragover','dragleave','drop'].forEach(ev => {
+      dropZone.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); });
+    });
+    dropZone.addEventListener('drop', (e) => {
+      addFiles(e.dataTransfer.files);
+    });
+  }
 
-            function appendRows(rows) {
-                rows.forEach(row => {
-                    const tr = document.createElement('tr');
-                    tr.innerHTML = `
-                        <td>${row.file || '不明'}</td>
-                        <td>${row.date || '不明'}</td>
-                        <td>${row.amount ? row.amount + '円' : '不明'}</td>
-                        <td>${row.vendor || '不明'}</td>
-                        <td>
-                            <span class="badge ${row.confidence >= 0.8 ? 'bg-success' : row.confidence >= 0.5 ? 'bg-warning' : 'bg-danger'}">
-                                ${row.confidence || '不明'}
-                            </span>
-                        </td>
-                        <td>
-                            <span class="badge ${row.needs_review === 'TRUE' ? 'bg-warning' : 'bg-success'}">
-                                ${row.needs_review === 'TRUE' ? 'はい' : 'いいえ'}
-                            </span>
-                        </td>
-                    `;
-                    resultsBody.appendChild(tr);
-                });
-            }
+  // --- upload action ---
+  if (uploadBtn) {
+    uploadBtn.addEventListener('click', async () => {
+      if (selectedFiles.length === 0) return;
+      const fd = new FormData();
+      selectedFiles.forEach(f => fd.append('files', f, f.name));
 
-            // Export buttons
-            btnSaveCsv.addEventListener('click', () => {
-                window.location.href = '/export/csv';
-            });
-            
-            btnSaveJson.addEventListener('click', () => {
-                window.location.href = '/export/json';
-            });
-            
-            btnClear.addEventListener('click', async () => {
-                try {
-                    await fetch('/api/clear', { method: 'POST' });
-                    selectedFiles = [];
-                    document.getElementById('fileInput').value = '';
-                    resultsBody.innerHTML = '';
-                    updateSelectedCount();
-                    btnUpload.disabled = true;
-                    resultContainer.classList.add('d-none');
-                } catch (error) {
-                    showError('クリアエラー: ' + error.message);
-                }
-            });
+      uploadBtn.disabled = true;
+      try {
+        const res  = await fetch('/api/upload', { method: 'POST', body: fd });
+        const json = await res.json();
+        renderTable(json);
+      } catch (error) {
+        showError('アップロードエラー: ' + error.message);
+      } finally {
+        updateButtonState();
+      }
+    });
+  }
 
-            function showError(message) {
-                errorMessage.textContent = message;
-                errorContainer.classList.remove('d-none');
-                setTimeout(() => {
-                    errorContainer.classList.add('d-none');
-                }, 5000);
-            }
+  // --- export buttons ---
+  if (btnSaveCsv) {
+    btnSaveCsv.addEventListener('click', () => {
+      window.location.href = '/export/csv';
+    });
+  }
+  
+  if (btnSaveJson) {
+    btnSaveJson.addEventListener('click', () => {
+      window.location.href = '/export/json';
+    });
+  }
+  
+  if (btnClear) {
+    btnClear.addEventListener('click', async () => {
+      try {
+        await fetch('/api/clear', { method: 'POST' });
+        clearAll();
+      } catch (error) {
+        showError('クリアエラー: ' + error.message);
+      }
+    });
+  }
+
+  // expose clearAll
+  window.__invoice_clearAll = clearAll;
+
+  // initial state
+  updateButtonState();
+})();
         </script>
     </body>
     </html>
