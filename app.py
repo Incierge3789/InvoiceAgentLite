@@ -22,12 +22,6 @@ import gspread
 import csv
 from io import StringIO
 
-# Validation constants
-MAX_FILES = 10
-MAX_SIZE = 3 * 1024 * 1024  # 3MB
-ALLOWED_EXT = {'.pdf'}
-ALLOWED_MIME = {'application/pdf'}
-
 # Japanese invoice extraction rule pack
 import re, unicodedata
 AMOUNT_RE = re.compile(r'(?:ご?\s*請求(?:金額|合計)|税込?合計|合計)[^\d]*(\d{1,3}(?:,\d{3})+|\d+)\s*円?')
@@ -744,13 +738,6 @@ def upload_page():
                             </div>
                             <a href="/settings" class="btn btn-outline-secondary btn-sm">⚙️ 設定</a>
                         </div>
-                        
-                        <!-- Error display container -->
-                        <div id="errorContainer" class="alert alert-danger alert-dismissible m-3 d-none" role="alert">
-                            <div id="errorList"></div>
-                            <button type="button" class="btn-close" aria-label="Close" onclick="document.getElementById('errorContainer').classList.add('d-none')"></button>
-                        </div>
-                        
                         <div class="card-body">
                             <form id="uploadForm">
                                 <div class="drop-zone mb-3" id="dropZone">
@@ -761,17 +748,16 @@ def upload_page():
                                         <h5>ここにPDFをドラッグ＆ドロップ、またはクリックして選択</h5>
                                         <p class="text-muted">PDFのみ、最大10ファイル（各3MB）</p>
                                     </div>
-                                    <input id="fileInput" name="files" type="file" accept="application/pdf" multiple class="d-none">
-                                    <button type="button" class="btn btn-outline-primary" id="browseAnchor">
+                                    <input type="file" id="fileInput" multiple accept="application/pdf" class="d-none">
+                                    <button type="button" class="btn btn-outline-primary" onclick="document.getElementById('fileInput').click()">
                                         📄 ファイルを選択（複数可）
                                     </button>
                                 </div>
                                 
-                                <div id="selectedCount" class="mb-2"></div>
-                                <div id="selectedList" class="file-list mb-3"></div>
+                                <div id="fileList" class="file-list mb-3"></div>
                                 
                                 <div class="d-grid gap-2">
-                                    <button id="uploadBtn" type="button" class="btn btn-primary w-100">
+                                    <button type="button" class="btn btn-primary" id="btnUpload" disabled>
                                         <span class="spinner-border spinner-border-sm me-2 d-none" id="uploadSpinner"></span>
                                         アップロードして解析
                                     </button>
@@ -839,37 +825,22 @@ def upload_page():
         </svg>
 
         <script>
-            // Validation constants (mirror backend)
-            const MAX_FILES = 10;
-            const MAX_SIZE = 3 * 1024 * 1024; // 3MB
-            const ALLOWED_EXT = ['.pdf'];
-            const ALLOWED_MIME = ['application/pdf'];
-            
-            // Error messages (fixed Japanese text)
-            const ERROR_MESSAGES = {
-                INVALID_TYPE: 'PDFファイルのみ対応しています。',
-                TOO_LARGE: 'ファイルサイズが上限（3MB）を超えています。',
-                TOO_MANY: '一度に選択できるのは最大10ファイルです。',
-                NO_FILE: 'ファイルが選択されていません。'
-            };
-
             const dropZone = document.getElementById('dropZone');
             const fileInput = document.getElementById('fileInput');
-            const listBox = document.getElementById('selectedList');
-            const countBox = document.getElementById('selectedCount');
-            const uploadBtn = document.getElementById('uploadBtn');
+            const fileList = document.getElementById('fileList');
+            const btnUpload = document.getElementById('btnUpload');
             const uploadSpinner = document.getElementById('uploadSpinner');
             const resultContainer = document.getElementById('resultContainer');
             const resultOutput = document.getElementById('resultOutput');
             const errorContainer = document.getElementById('errorContainer');
-            const errorList = document.getElementById('errorList');
+            const errorMessage = document.getElementById('errorMessage');
             const btnSaveCsv = document.getElementById('btnSaveCsv');
             const btnSaveJson = document.getElementById('btnSaveJson');
             const btnClear = document.getElementById('btnClear');
             const resultsBody = document.getElementById('resultsBody');
             
             let selectedFiles = [];
-            let validationErrors = [];
+            let lastResult = null;
 
             // Drag and drop functionality
             dropZone.addEventListener('dragover', (e) => {
@@ -884,103 +855,70 @@ def upload_page():
             dropZone.addEventListener('drop', (e) => {
                 e.preventDefault();
                 dropZone.classList.remove('dragover');
-                validateAndAddFiles(e.dataTransfer.files);
+                handleFiles(e.dataTransfer.files);
             });
             
-            const browseAnchor = document.getElementById('browseAnchor');
-            if (browseAnchor) {
-                browseAnchor.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    fileInput?.click();
-                });
-            }
+            dropZone.addEventListener('click', () => {
+                fileInput.click();
+            });
             
             fileInput.addEventListener('change', (e) => {
-                validateAndAddFiles(e.target.files);
-                e.target.value = '';
+                handleFiles(e.target.files);
             });
 
-
-            function updateButtonState() {
-                uploadBtn.disabled = (selectedFiles.length === 0);
-                uploadBtn.classList.toggle('disabled', selectedFiles.length === 0);
-            }
-            
-            function renderSelected() {
-                if (countBox) countBox.textContent = `${selectedFiles.length}ファイル選択`;
-                if (listBox) {
-                    listBox.innerHTML = selectedFiles.map(f => 
-                        `<div class="small text-muted">${f.name} (${(f.size/1024/1024).toFixed(2)}MB)</div>`
-                    ).join('');
-                }
-            }
-            
-            function showErrors() {
-                if (validationErrors.length > 0) {
-                    const errorHtml = validationErrors.map(error => `<div>${error}</div>`).join('');
-                    errorList.innerHTML = errorHtml;
-                    errorContainer.classList.remove('d-none');
-                } else {
-                    errorContainer.classList.add('d-none');
-                }
-            }
-            
-            function validateAndAddFiles(newFiles) {
-                validationErrors = []; // Reset errors
-                const currentCount = selectedFiles.length;
-                const newFilesArray = Array.from(newFiles);
-                
-                // Check total file count
-                if (currentCount + newFilesArray.length > MAX_FILES) {
-                    const excessCount = (currentCount + newFilesArray.length) - MAX_FILES;
-                    validationErrors.push(ERROR_MESSAGES.TOO_MANY);
-                    // Keep only first MAX_FILES - currentCount files
-                    newFilesArray.splice(MAX_FILES - currentCount);
+            function handleFiles(files) {
+                if (files.length > 10) {
+                    showError('一度に処理できるファイルは最大10個までです。');
+                    return;
                 }
                 
-                // Validate each file
-                const validFiles = [];
-                for (const file of newFilesArray) {
-                    let isValid = true;
-                    
-                    // Check file type (MIME and extension)
-                    const isValidMime = ALLOWED_MIME.includes(file.type);
-                    const isValidExt = ALLOWED_EXT.some(ext => file.name.toLowerCase().endsWith(ext));
-                    
-                    if (!isValidMime && !isValidExt) {
-                        validationErrors.push(`${file.name}: ${ERROR_MESSAGES.INVALID_TYPE}`);
-                        isValid = false;
+                selectedFiles = Array.from(files).filter(file => {
+                    if (file.type !== 'application/pdf') {
+                        showError(`ファイル ${file.name} - PDFファイルのみ対応しています。`);
+                        return false;
                     }
-                    
-                    // Check file size
-                    if (file.size > MAX_SIZE) {
-                        validationErrors.push(`${file.name}: ${ERROR_MESSAGES.TOO_LARGE}`);
-                        isValid = false;
+                    if (file.size > 3 * 1024 * 1024) {
+                        showError(`ファイル ${file.name} - ファイルサイズが上限（3MB）を超えています。`);
+                        return false;
                     }
-                    
-                    if (isValid) {
-                        validFiles.push(file);
-                    }
-                }
+                    return true;
+                });
                 
-                // Add valid files to selection
-                selectedFiles = selectedFiles.concat(validFiles);
-                
-                // Update UI
-                renderSelected();
-                updateButtonState();
-                showErrors();
+                updateFileList();
+                btnUpload.disabled = selectedFiles.length === 0;
             }
 
-            uploadBtn.addEventListener('click', async () => {
+            function updateFileList() {
+                if (selectedFiles.length === 0) {
+                    fileList.innerHTML = '';
+                    return;
+                }
+                
+                const countText = `${selectedFiles.length}ファイル選択`;
+                const listHtml = selectedFiles.map(file => 
+                    `<div class="d-flex justify-content-between align-items-center border-bottom py-2">
+                        <span>${file.name}</span>
+                        <small class="text-muted">${(file.size / 1024 / 1024).toFixed(2)} MB</small>
+                    </div>`
+                ).join('');
+                
+                fileList.innerHTML = `
+                    <div class="alert alert-info">${countText}</div>
+                    <div class="border rounded p-2">${listHtml}</div>
+                `;
+            }
+
+            btnUpload.addEventListener('click', async () => {
                 if (selectedFiles.length === 0) return;
                 
-                uploadBtn.disabled = true;
+                btnUpload.disabled = true;
                 uploadSpinner.classList.remove('d-none');
                 
                 try {
                     const fd = new FormData();
-                    selectedFiles.forEach(f => fd.append('files', f, f.name));
+                    for (const f of selectedFiles) { 
+                        fd.append('files', f); 
+                    }
                     
                     const response = await fetch('/api/upload', { 
                         method: 'POST', 
@@ -990,32 +928,16 @@ def upload_page():
                     const json = await response.json();
                     
                     if (json.ok) {
-                        if (json.results && json.results.length > 0) {
-                            appendRows(json.results);
-                            resultContainer.classList.remove('d-none');
-                        }
-                        if (json.errors && json.errors.length > 0) {
-                            const serverErrors = json.errors.map(err => err.message || err).join('\n');
-                            errorList.innerHTML = `<div>サーバーエラー: ${serverErrors}</div>`;
-                            errorContainer.classList.remove('d-none');
-                        }
-                        if (resultOutput) {
-                            resultOutput.textContent = JSON.stringify(json, null, 2);
-                        }
+                        appendRows(json.results);
+                        resultOutput.textContent = JSON.stringify(json, null, 2);
+                        resultContainer.classList.remove('d-none');
                     } else {
-                        const errorMsg = json.error || '不明なエラー';
-                        if (json.errors && json.errors.length > 0) {
-                            const serverErrors = json.errors.map(err => err.message || err);
-                            errorList.innerHTML = serverErrors.map(err => `<div>${err}</div>`).join('');
-                        } else {
-                            errorList.innerHTML = `<div>${errorMsg}</div>`;
-                        }
-                        errorContainer.classList.remove('d-none');
+                        showError('アップロードに失敗しました: ' + (json.error || '不明なエラー'));
                     }
                 } catch (error) {
                     showError('アップロードエラー: ' + error.message);
                 } finally {
-                    uploadBtn.disabled = false;
+                    btnUpload.disabled = false;
                     uploadSpinner.classList.add('d-none');
                 }
             });
@@ -1055,26 +977,24 @@ def upload_page():
             btnClear.addEventListener('click', async () => {
                 try {
                     await fetch('/api/clear', { method: 'POST' });
-                    selectedFiles = [];
-                    validationErrors = [];
-                    document.getElementById('fileInput').value = '';
                     resultsBody.innerHTML = '';
-                    renderSelected();
-                    updateButtonState();
-                    errorContainer.classList.add('d-none');
+                    fileInput.value = '';
+                    selectedFiles = [];
+                    updateFileList();
+                    btnUpload.disabled = true;
                     resultContainer.classList.add('d-none');
                 } catch (error) {
-                    console.error('Clear error:', error);
+                    showError('クリアエラー: ' + error.message);
                 }
             });
 
             function showError(message) {
-                errorList.innerHTML = `<div>${message}</div>`;
+                errorMessage.textContent = message;
                 errorContainer.classList.remove('d-none');
+                setTimeout(() => {
+                    errorContainer.classList.add('d-none');
+                }, 5000);
             }
-            
-            // Initialize button state
-            updateButtonState();
         </script>
     </body>
     </html>
@@ -1083,67 +1003,40 @@ def upload_page():
 
 @app.route("/api/upload", methods=['POST'])
 def upload_files():
-    """Process uploaded PDF files with strict validation"""
+    """Process uploaded PDF files"""
     files = request.files.getlist("files")
     
-    # Check if no files were provided
-    if not files or (len(files) == 1 and not files[0].filename):
-        return jsonify({
-            "ok": False, 
-            "errors": [{"file": None, "code": "NO_FILE", "message": "ファイルが選択されていません。"}]
-        }), 400
+    if not files:
+        return jsonify({"ok": False, "error": "ファイルが選択されていません"}), 400
+    
+    # Validate file count (max 10 files)  
+    if len(files) > 10:
+        return jsonify({"ok": False, "error": "一度に処理できるファイルは最大10個までです"}), 400
     
     results = []
     errors = []
     
-    # Validate file count and keep only first MAX_FILES
-    if len(files) > MAX_FILES:
-        for i in range(MAX_FILES, len(files)):
-            errors.append({
-                "file": files[i].filename,
-                "code": "TOO_MANY", 
-                "message": "一度に選択できるのは最大10ファイルです。"
-            })
-        files = files[:MAX_FILES]
-    
     for file in files:
-        filename = secure_filename(file.filename) if file.filename else "unknown.pdf"
-        
         try:
-            # Validate file type (extension and MIME)
-            if not file.filename:
-                errors.append({
-                    "file": filename,
-                    "code": "INVALID_TYPE",
-                    "message": "PDFファイルのみ対応しています。"
-                })
+            filename = secure_filename(file.filename) if file.filename else "unknown.pdf"
+            
+            # Validate file type
+            if not allowed_file(file.filename):
+                errors.append(f"ファイル {filename}: PDFファイルのみ対応しています。")
                 continue
                 
-            file_ext = os.path.splitext(file.filename.lower())[1]
-            if file_ext not in ALLOWED_EXT or file.content_type not in ALLOWED_MIME:
-                errors.append({
-                    "file": filename,
-                    "code": "INVALID_TYPE", 
-                    "message": "PDFファイルのみ対応しています。"
-                })
-                continue
-            
-            # Read file content to check size
+            # Read file content
             content = file.read()
             
-            # Validate file size
-            if len(content) > MAX_SIZE:
-                errors.append({
-                    "file": filename,
-                    "code": "TOO_LARGE",
-                    "message": "ファイルサイズが上限（3MB）を超えています。"
-                })
+            # Validate file size (3MB)
+            if len(content) > MAX_FILE_SIZE:
+                errors.append(f"ファイル {filename}: ファイルサイズが上限（3MB）を超えています。")
                 continue
             
-            # Extract text from PDF
+            # Extract text from PDF using existing processor
             text = processor.extract_text_from_pdf(content)
             
-            # Use Japanese extraction rules
+            # Use existing Japanese extraction rules
             fields = extract_fields_jp(text)
             
             # Build row dict with all required fields
@@ -1152,8 +1045,8 @@ def upload_files():
                 "date": fields.get("date"),
                 "amount": fields.get("amount"), 
                 "vendor": fields.get("vendor"),
-                "confidence": fields.get("confidence", 0.0),
-                "needs_review": fields.get("needs_review", "TRUE"),
+                "confidence": fields.get("confidence"),
+                "needs_review": fields.get("needs_review"),
                 "raw_excerpt": text[:500]
             }
             
@@ -1170,18 +1063,12 @@ def upload_files():
                     logger.error(f"Failed to save to sheets: {e}")
             
         except Exception as e:
-            logger.error(f"Error processing file {filename}: {e}")
-            errors.append({
-                "file": filename,
-                "code": "PROCESSING_ERROR",
-                "message": f"処理に失敗しました - {str(e)}"
-            })
+            logger.error(f"Error processing file {file.filename}: {e}")
+            errors.append(f"ファイル {filename}: 処理に失敗しました - {str(e)}")
     
-    # If all files failed, return error
     if errors and not results:
-        return jsonify({"ok": False, "errors": errors}), 400
+        return jsonify({"ok": False, "error": "処理に失敗しました", "errors": errors}), 422
     
-    # Return success with both results and errors (if any)
     response = {"ok": True, "results": results}
     if errors:
         response["errors"] = errors
