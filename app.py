@@ -18,6 +18,39 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+# Japanese invoice extraction rule pack
+import re, unicodedata
+AMOUNT_RE = re.compile(r'(?:ご?\s*請求(?:金額|合計)|税込?合計|合計)[^\d]*(\d{1,3}(?:,\d{3})+|\d+)\s*円?')
+DATE_RE   = re.compile(r'(?:発行日|請求日|納品日|支払期限)[^\d]*(\d{4}[./年]\s*\d{1,2}[./月]\s*\d{1,2}日?)')
+VENDOR_RE = re.compile(r'(?:株式会社|有限会社|合同会社)[^\n]+|.+?御中')
+def _normalize(txt: str) -> str:
+    import unicodedata, re
+    t = unicodedata.normalize('NFKC', txt).replace('\u3000',' ')
+    return re.sub(r'[ \t]+', ' ', t)
+def extract_fields_jp(text: str):
+    t = _normalize(text)
+    amount = None
+    m = AMOUNT_RE.search(t)
+    if m: amount = int(m.group(1).replace(',', ''))
+    date = None
+    dm = DATE_RE.search(t)
+    if dm:
+        date = dm.group(1)
+        date = (date.replace('年','-').replace('月','-').replace('日','')
+                    .replace('/','-').replace('.','-'))
+        import re
+        date = re.sub(r'\s+', '', date)
+    vendor = None
+    head = '\n'.join(t.splitlines()[:20])
+    vm = VENDOR_RE.search(head)
+    if vm: vendor = vm.group(0).replace('御中','').strip()
+    score = sum(x is not None for x in [amount, date, vendor]) / 3
+    return {
+        "amount": amount, "date": date, "vendor": vendor,
+        "confidence": round(score, 2),
+        "needs_review": "TRUE" if score < 0.8 else "FALSE",
+    }
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -535,14 +568,20 @@ def upload_files():
                 errors.append(f"File {file.filename}: File size exceeds 3MB limit.")
                 continue
             
-            # Process the PDF
+            # Extract text from PDF
             filename = secure_filename(file.filename) if file.filename else "unknown.pdf"
-            result = processor.process_pdf(filename, content)
+            text = processor.extract_text_from_pdf(content)
             
-            # Append to Google Sheets
-            sheet_success = processor.append_to_sheet(result)
-            if not sheet_success:
-                logger.warning(f"Failed to append {filename} to sheet")
+            # Use Japanese extraction rules
+            fields = extract_fields_jp(text)
+            
+            # Build result with required keys
+            result = {
+                "ok": True,
+                "file": filename,
+                "raw_excerpt": text[:500],
+                **fields
+            }
             
             results.append(result)
             
@@ -553,6 +592,14 @@ def upload_files():
     if errors and not results:
         return jsonify({"error": "Processing failed", "errors": errors}), 422
     
+    # For single file upload, return the result directly
+    if len(results) == 1:
+        result = results[0]
+        if errors:
+            result["errors"] = errors
+        return jsonify(result)
+    
+    # For multiple files, return as before
     response = {
         "ok": True,
         "results": results
