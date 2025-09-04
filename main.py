@@ -661,15 +661,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
     
     return UploadResponse(results=results)
 
-# WSGI compatibility for gunicorn using a2wsgi adapter
-try:
-    from a2wsgi import ASGIMiddleware
-    application = ASGIMiddleware(app)
-    logger.info("Successfully created ASGI to WSGI adapter")
-except Exception as e:
-    logger.error(f"Failed to create ASGI adapter: {e}")
-    # Fallback to direct FastAPI app (will cause ASGI/WSGI errors but at least we can debug)
-    application = app
+# No WSGI adapter needed - using uvicorn for ASGI deployment
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
