@@ -22,6 +22,12 @@ import gspread
 import csv
 from io import StringIO
 
+# Validation constants
+MAX_FILES = 10
+MAX_SIZE = 3 * 1024 * 1024  # 3MB
+ALLOWED_EXT = {'.pdf'}
+ALLOWED_MIME = {'application/pdf'}
+
 # Japanese invoice extraction rule pack
 import re, unicodedata
 AMOUNT_RE = re.compile(r'(?:ご?\s*請求(?:金額|合計)|税込?合計|合計)[^\d]*(\d{1,3}(?:,\d{3})+|\d+)\s*円?')
@@ -738,6 +744,13 @@ def upload_page():
                             </div>
                             <a href="/settings" class="btn btn-outline-secondary btn-sm">⚙️ 設定</a>
                         </div>
+                        
+                        <!-- Error display container -->
+                        <div id="errorContainer" class="alert alert-danger alert-dismissible m-3 d-none" role="alert">
+                            <div id="errorList"></div>
+                            <button type="button" class="btn-close" aria-label="Close" onclick="document.getElementById('errorContainer').classList.add('d-none')"></button>
+                        </div>
+                        
                         <div class="card-body">
                             <form id="uploadForm">
                                 <div class="drop-zone mb-3" id="dropZone">
@@ -826,6 +839,20 @@ def upload_page():
         </svg>
 
         <script>
+            // Validation constants (mirror backend)
+            const MAX_FILES = 10;
+            const MAX_SIZE = 3 * 1024 * 1024; // 3MB
+            const ALLOWED_EXT = ['.pdf'];
+            const ALLOWED_MIME = ['application/pdf'];
+            
+            // Error messages (fixed Japanese text)
+            const ERROR_MESSAGES = {
+                INVALID_TYPE: 'PDFファイルのみ対応しています。',
+                TOO_LARGE: 'ファイルサイズが上限（3MB）を超えています。',
+                TOO_MANY: '一度に選択できるのは最大10ファイルです。',
+                NO_FILE: 'ファイルが選択されていません。'
+            };
+
             const dropZone = document.getElementById('dropZone');
             const fileInput = document.getElementById('fileInput');
             const listBox = document.getElementById('selectedList');
@@ -835,14 +862,14 @@ def upload_page():
             const resultContainer = document.getElementById('resultContainer');
             const resultOutput = document.getElementById('resultOutput');
             const errorContainer = document.getElementById('errorContainer');
-            const errorMessage = document.getElementById('errorMessage');
+            const errorList = document.getElementById('errorList');
             const btnSaveCsv = document.getElementById('btnSaveCsv');
             const btnSaveJson = document.getElementById('btnSaveJson');
             const btnClear = document.getElementById('btnClear');
             const resultsBody = document.getElementById('resultsBody');
             
             let selectedFiles = [];
-            let lastResult = null;
+            let validationErrors = [];
 
             // Drag and drop functionality
             dropZone.addEventListener('dragover', (e) => {
@@ -857,7 +884,7 @@ def upload_page():
             dropZone.addEventListener('drop', (e) => {
                 e.preventDefault();
                 dropZone.classList.remove('dragover');
-                addFiles(e.dataTransfer.files);
+                validateAndAddFiles(e.dataTransfer.files);
             });
             
             const browseAnchor = document.getElementById('browseAnchor');
@@ -869,7 +896,7 @@ def upload_page():
             }
             
             fileInput.addEventListener('change', (e) => {
-                addFiles(e.target.files);
+                validateAndAddFiles(e.target.files);
                 e.target.value = '';
             });
 
@@ -878,15 +905,71 @@ def upload_page():
                 uploadBtn.disabled = (selectedFiles.length === 0);
                 uploadBtn.classList.toggle('disabled', selectedFiles.length === 0);
             }
+            
             function renderSelected() {
                 if (countBox) countBox.textContent = `${selectedFiles.length}ファイル選択`;
-                if (listBox)  listBox.innerHTML = selectedFiles.map(f => `<div class="small text-muted">${f.name} (${(f.size/1024/1024).toFixed(2)}MB)</div>`).join('');
+                if (listBox) {
+                    listBox.innerHTML = selectedFiles.map(f => 
+                        `<div class="small text-muted">${f.name} (${(f.size/1024/1024).toFixed(2)}MB)</div>`
+                    ).join('');
+                }
             }
-            function addFiles(files) {
-                const pdfs = Array.from(files).filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
-                selectedFiles = selectedFiles.concat(pdfs);
+            
+            function showErrors() {
+                if (validationErrors.length > 0) {
+                    const errorHtml = validationErrors.map(error => `<div>${error}</div>`).join('');
+                    errorList.innerHTML = errorHtml;
+                    errorContainer.classList.remove('d-none');
+                } else {
+                    errorContainer.classList.add('d-none');
+                }
+            }
+            
+            function validateAndAddFiles(newFiles) {
+                validationErrors = []; // Reset errors
+                const currentCount = selectedFiles.length;
+                const newFilesArray = Array.from(newFiles);
+                
+                // Check total file count
+                if (currentCount + newFilesArray.length > MAX_FILES) {
+                    const excessCount = (currentCount + newFilesArray.length) - MAX_FILES;
+                    validationErrors.push(ERROR_MESSAGES.TOO_MANY);
+                    // Keep only first MAX_FILES - currentCount files
+                    newFilesArray.splice(MAX_FILES - currentCount);
+                }
+                
+                // Validate each file
+                const validFiles = [];
+                for (const file of newFilesArray) {
+                    let isValid = true;
+                    
+                    // Check file type (MIME and extension)
+                    const isValidMime = ALLOWED_MIME.includes(file.type);
+                    const isValidExt = ALLOWED_EXT.some(ext => file.name.toLowerCase().endsWith(ext));
+                    
+                    if (!isValidMime && !isValidExt) {
+                        validationErrors.push(`${file.name}: ${ERROR_MESSAGES.INVALID_TYPE}`);
+                        isValid = false;
+                    }
+                    
+                    // Check file size
+                    if (file.size > MAX_SIZE) {
+                        validationErrors.push(`${file.name}: ${ERROR_MESSAGES.TOO_LARGE}`);
+                        isValid = false;
+                    }
+                    
+                    if (isValid) {
+                        validFiles.push(file);
+                    }
+                }
+                
+                // Add valid files to selection
+                selectedFiles = selectedFiles.concat(validFiles);
+                
+                // Update UI
                 renderSelected();
                 updateButtonState();
+                showErrors();
             }
 
             uploadBtn.addEventListener('click', async () => {
@@ -907,11 +990,27 @@ def upload_page():
                     const json = await response.json();
                     
                     if (json.ok) {
-                        appendRows(json.results);
-                        resultOutput.textContent = JSON.stringify(json, null, 2);
-                        resultContainer.classList.remove('d-none');
+                        if (json.results && json.results.length > 0) {
+                            appendRows(json.results);
+                            resultContainer.classList.remove('d-none');
+                        }
+                        if (json.errors && json.errors.length > 0) {
+                            const serverErrors = json.errors.map(err => err.message || err).join('\n');
+                            errorList.innerHTML = `<div>サーバーエラー: ${serverErrors}</div>`;
+                            errorContainer.classList.remove('d-none');
+                        }
+                        if (resultOutput) {
+                            resultOutput.textContent = JSON.stringify(json, null, 2);
+                        }
                     } else {
-                        showError('アップロードに失敗しました: ' + (json.error || '不明なエラー'));
+                        const errorMsg = json.error || '不明なエラー';
+                        if (json.errors && json.errors.length > 0) {
+                            const serverErrors = json.errors.map(err => err.message || err);
+                            errorList.innerHTML = serverErrors.map(err => `<div>${err}</div>`).join('');
+                        } else {
+                            errorList.innerHTML = `<div>${errorMsg}</div>`;
+                        }
+                        errorContainer.classList.remove('d-none');
                     }
                 } catch (error) {
                     showError('アップロードエラー: ' + error.message);
@@ -957,23 +1056,21 @@ def upload_page():
                 try {
                     await fetch('/api/clear', { method: 'POST' });
                     selectedFiles = [];
+                    validationErrors = [];
                     document.getElementById('fileInput').value = '';
                     resultsBody.innerHTML = '';
                     renderSelected();
                     updateButtonState();
-                    uploadBtn.disabled = true;
+                    errorContainer.classList.add('d-none');
                     resultContainer.classList.add('d-none');
                 } catch (error) {
-                    showError('クリアエラー: ' + error.message);
+                    console.error('Clear error:', error);
                 }
             });
 
             function showError(message) {
-                errorMessage.textContent = message;
+                errorList.innerHTML = `<div>${message}</div>`;
                 errorContainer.classList.remove('d-none');
-                setTimeout(() => {
-                    errorContainer.classList.add('d-none');
-                }, 5000);
             }
             
             // Initialize button state
@@ -986,40 +1083,67 @@ def upload_page():
 
 @app.route("/api/upload", methods=['POST'])
 def upload_files():
-    """Process uploaded PDF files"""
+    """Process uploaded PDF files with strict validation"""
     files = request.files.getlist("files")
     
-    if not files:
-        return jsonify({"ok": False, "error": "ファイルが選択されていません"}), 400
-    
-    # Validate file count (max 10 files)  
-    if len(files) > 10:
-        return jsonify({"ok": False, "error": "一度に処理できるファイルは最大10個までです"}), 400
+    # Check if no files were provided
+    if not files or (len(files) == 1 and not files[0].filename):
+        return jsonify({
+            "ok": False, 
+            "errors": [{"file": None, "code": "NO_FILE", "message": "ファイルが選択されていません。"}]
+        }), 400
     
     results = []
     errors = []
     
+    # Validate file count and keep only first MAX_FILES
+    if len(files) > MAX_FILES:
+        for i in range(MAX_FILES, len(files)):
+            errors.append({
+                "file": files[i].filename,
+                "code": "TOO_MANY", 
+                "message": "一度に選択できるのは最大10ファイルです。"
+            })
+        files = files[:MAX_FILES]
+    
     for file in files:
+        filename = secure_filename(file.filename) if file.filename else "unknown.pdf"
+        
         try:
-            filename = secure_filename(file.filename) if file.filename else "unknown.pdf"
-            
-            # Validate file type
-            if not allowed_file(file.filename):
-                errors.append(f"ファイル {filename}: PDFファイルのみ対応しています。")
+            # Validate file type (extension and MIME)
+            if not file.filename:
+                errors.append({
+                    "file": filename,
+                    "code": "INVALID_TYPE",
+                    "message": "PDFファイルのみ対応しています。"
+                })
                 continue
                 
-            # Read file content
-            content = file.read()
-            
-            # Validate file size (3MB)
-            if len(content) > MAX_FILE_SIZE:
-                errors.append(f"ファイル {filename}: ファイルサイズが上限（3MB）を超えています。")
+            file_ext = os.path.splitext(file.filename.lower())[1]
+            if file_ext not in ALLOWED_EXT or file.content_type not in ALLOWED_MIME:
+                errors.append({
+                    "file": filename,
+                    "code": "INVALID_TYPE", 
+                    "message": "PDFファイルのみ対応しています。"
+                })
                 continue
             
-            # Extract text from PDF using existing processor
+            # Read file content to check size
+            content = file.read()
+            
+            # Validate file size
+            if len(content) > MAX_SIZE:
+                errors.append({
+                    "file": filename,
+                    "code": "TOO_LARGE",
+                    "message": "ファイルサイズが上限（3MB）を超えています。"
+                })
+                continue
+            
+            # Extract text from PDF
             text = processor.extract_text_from_pdf(content)
             
-            # Use existing Japanese extraction rules
+            # Use Japanese extraction rules
             fields = extract_fields_jp(text)
             
             # Build row dict with all required fields
@@ -1028,8 +1152,8 @@ def upload_files():
                 "date": fields.get("date"),
                 "amount": fields.get("amount"), 
                 "vendor": fields.get("vendor"),
-                "confidence": fields.get("confidence"),
-                "needs_review": fields.get("needs_review"),
+                "confidence": fields.get("confidence", 0.0),
+                "needs_review": fields.get("needs_review", "TRUE"),
                 "raw_excerpt": text[:500]
             }
             
@@ -1046,12 +1170,18 @@ def upload_files():
                     logger.error(f"Failed to save to sheets: {e}")
             
         except Exception as e:
-            logger.error(f"Error processing file {file.filename}: {e}")
-            errors.append(f"ファイル {filename}: 処理に失敗しました - {str(e)}")
+            logger.error(f"Error processing file {filename}: {e}")
+            errors.append({
+                "file": filename,
+                "code": "PROCESSING_ERROR",
+                "message": f"処理に失敗しました - {str(e)}"
+            })
     
+    # If all files failed, return error
     if errors and not results:
-        return jsonify({"ok": False, "error": "処理に失敗しました", "errors": errors}), 422
+        return jsonify({"ok": False, "errors": errors}), 400
     
+    # Return success with both results and errors (if any)
     response = {"ok": True, "results": results}
     if errors:
         response["errors"] = errors
