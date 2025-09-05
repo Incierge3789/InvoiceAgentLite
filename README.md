@@ -2,6 +2,22 @@
 
 A FastAPI-based PDF invoice processing system that extracts financial data from PDF invoices and automatically saves the results to Google Sheets.
 
+# インボイス自動読取 Lite（ローカル実行版）
+
+## 使い方（CSV/JSON保存のみ、Google連携なし）
+1. ZIPを解凍してフォルダを開く  
+2. macOS/Linux: `bash run.sh`  
+   Windows: `run.bat` をダブルクリック
+3. ブラウザで `http://127.0.0.1:5050/upload` を開く  
+4. PDFを複数選択→「アップロードして解析」  
+   右上のボタンで **CSV/JSONを保存** できます
+
+## Googleスプレッドシート連携（任意）
+1. `http://127.0.0.1:5050/settings` を開く  
+2. サービスアカウントJSONを貼り付け  
+3. シートID/シート名を入力して「保存して接続テスト」
+
+
 ## Features
 
 - **PDF Upload**: Web interface with drag & drop support for multiple PDF files

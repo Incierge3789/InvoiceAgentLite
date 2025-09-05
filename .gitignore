@@ -1,21 +1,13 @@
-data/
+# venv / build
+.venv/
+.buildvenv/
+dist/
+build/
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-env/
-pip-log.txt
-pip-delete-this-directory.txt
-.tox
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.log
-.git
-.mypy_cache
-.pytest_cache
-.hypothesis
+*.spec
+# mac / editor
+.DS_Store
+*.swp
+# artifacts
+*.dmg
+*.zip
