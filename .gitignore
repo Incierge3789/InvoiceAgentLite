@@ -11,3 +11,6 @@ __pycache__/
 # artifacts
 *.dmg
 *.zip
+
+# replit agent cache
+.local/
